@@ -1,88 +1,821 @@
 import SwiftUI
 import AVFoundation
 import Combine
+import CoreData
+import XMLCoder
+import Network
 
 // MARK: - Models
-struct Podcast: Identifiable, Codable {
+struct Podcast: Identifiable, Hashable, Codable {
     var id: String
     var title: String
     var author: String
     var description: String
     var imageUrl: String
     var feedUrl: String
-    var episodes: [Episode]?
+    var isSubscribed: Bool = false
+    
+    static func == (lhs: Podcast, rhs: Podcast) -> Bool {
+        return lhs.id == rhs.id
+    }
+    
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
 }
 
-struct Episode: Identifiable, Codable {
+struct Episode: Identifiable, Hashable, Codable {
     var id: String
+    var podcastId: String
     var title: String
     var description: String
     var audioUrl: String
     var publishDate: Date
     var duration: TimeInterval
+    var fileSize: Int64
     var isDownloaded: Bool = false
-    var downloadProgress: Float = 0.0
+    var downloadPath: String? = nil
+    var playProgress: TimeInterval = 0
+    
+    static func == (lhs: Episode, rhs: Episode) -> Bool {
+        return lhs.id == rhs.id
+    }
+    
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
+// MARK: - RSS Feed Models
+struct RSSFeed: Codable {
+    let channel: Channel
+}
+
+struct Channel: Codable {
+    let title: String
+    let description: String
+    let link: String
+    let image: RSSImage?
+    let author: String?
+    let items: [Item]
+    
+    enum CodingKeys: String, CodingKey {
+        case title, description, link, image, author = "itunes:author", items = "item"
+    }
+}
+
+struct RSSImage: Codable {
+    let url: String
+    let title: String?
+    let link: String?
+}
+
+struct Item: Codable {
+    let title: String
+    let description: String?
+    let pubDate: String?
+    let enclosure: Enclosure?
+    let guid: GUID
+    let duration: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case title, description, pubDate, enclosure, guid
+        case duration = "itunes:duration"
+    }
+}
+
+struct Enclosure: Codable {
+    let url: String
+    let length: String?
+    let type: String?
+}
+
+struct GUID: Codable {
+    let value: String
+    
+    enum CodingKeys: String, CodingKey {
+        case value = ""
+    }
+}
+
+// MARK: - Core Data Model
+class PersistenceController {
+    static let shared = PersistenceController()
+    
+    let container: NSPersistentContainer
+    
+    init() {
+        container = NSPersistentContainer(name: "PodcastModel")
+        
+        container.loadPersistentStores { description, error in
+            if let error = error {
+                fatalError("Error loading Core Data: \(error.localizedDescription)")
+            }
+        }
+        
+        // Create model if it doesn't exist
+        let modelURL = Bundle.main.url(forResource: "PodcastModel", withExtension: "momd")
+        if modelURL == nil {
+            createCoreDataModel()
+        }
+    }
+    
+    private func createCoreDataModel() {
+        let managedObjectModel = NSManagedObjectModel()
+        
+        // Podcast Entity
+        let podcastEntity = NSEntityDescription()
+        podcastEntity.name = "CDPodcast"
+        podcastEntity.managedObjectClassName = "CDPodcast"
+        
+        let podcastId = NSAttributeDescription()
+        podcastId.name = "id"
+        podcastId.attributeType = .stringAttributeType
+        podcastId.isOptional = false
+        
+        let podcastTitle = NSAttributeDescription()
+        podcastTitle.name = "title"
+        podcastTitle.attributeType = .stringAttributeType
+        podcastTitle.isOptional = false
+        
+        let podcastAuthor = NSAttributeDescription()
+        podcastAuthor.name = "author"
+        podcastAuthor.attributeType = .stringAttributeType
+        podcastAuthor.isOptional = true
+        
+        let podcastDesc = NSAttributeDescription()
+        podcastDesc.name = "podcastDescription"
+        podcastDesc.attributeType = .stringAttributeType
+        podcastDesc.isOptional = true
+        
+        let podcastImageUrl = NSAttributeDescription()
+        podcastImageUrl.name = "imageUrl"
+        podcastImageUrl.attributeType = .stringAttributeType
+        podcastImageUrl.isOptional = true
+        
+        let podcastFeedUrl = NSAttributeDescription()
+        podcastFeedUrl.name = "feedUrl"
+        podcastFeedUrl.attributeType = .stringAttributeType
+        podcastFeedUrl.isOptional = false
+        
+        let podcastIsSubscribed = NSAttributeDescription()
+        podcastIsSubscribed.name = "isSubscribed"
+        podcastIsSubscribed.attributeType = .booleanAttributeType
+        podcastIsSubscribed.defaultValue = false
+        
+        podcastEntity.properties = [podcastId, podcastTitle, podcastAuthor, podcastDesc, podcastImageUrl, podcastFeedUrl, podcastIsSubscribed]
+        
+        // Episode Entity
+        let episodeEntity = NSEntityDescription()
+        episodeEntity.name = "CDEpisode"
+        episodeEntity.managedObjectClassName = "CDEpisode"
+        
+        let episodeId = NSAttributeDescription()
+        episodeId.name = "id"
+        episodeId.attributeType = .stringAttributeType
+        episodeId.isOptional = false
+        
+        let episodePodcastId = NSAttributeDescription()
+        episodePodcastId.name = "podcastId"
+        episodePodcastId.attributeType = .stringAttributeType
+        episodePodcastId.isOptional = false
+        
+        let episodeTitle = NSAttributeDescription()
+        episodeTitle.name = "title"
+        episodeTitle.attributeType = .stringAttributeType
+        episodeTitle.isOptional = false
+        
+        let episodeDesc = NSAttributeDescription()
+        episodeDesc.name = "episodeDescription"
+        episodeDesc.attributeType = .stringAttributeType
+        episodeDesc.isOptional = true
+        
+        let episodeAudioUrl = NSAttributeDescription()
+        episodeAudioUrl.name = "audioUrl"
+        episodeAudioUrl.attributeType = .stringAttributeType
+        episodeAudioUrl.isOptional = false
+        
+        let episodePublishDate = NSAttributeDescription()
+        episodePublishDate.name = "publishDate"
+        episodePublishDate.attributeType = .dateAttributeType
+        episodePublishDate.isOptional = true
+        
+        let episodeDuration = NSAttributeDescription()
+        episodeDuration.name = "duration"
+        episodeDuration.attributeType = .doubleAttributeType
+        episodeDuration.defaultValue = 0.0
+        
+        let episodeFileSize = NSAttributeDescription()
+        episodeFileSize.name = "fileSize"
+        episodeFileSize.attributeType = .integer64AttributeType
+        episodeFileSize.defaultValue = 0
+        
+        let episodeIsDownloaded = NSAttributeDescription()
+        episodeIsDownloaded.name = "isDownloaded"
+        episodeIsDownloaded.attributeType = .booleanAttributeType
+        episodeIsDownloaded.defaultValue = false
+        
+        let episodeDownloadPath = NSAttributeDescription()
+        episodeDownloadPath.name = "downloadPath"
+        episodeDownloadPath.attributeType = .stringAttributeType
+        episodeDownloadPath.isOptional = true
+        
+        let episodePlayProgress = NSAttributeDescription()
+        episodePlayProgress.name = "playProgress"
+        episodePlayProgress.attributeType = .doubleAttributeType
+        episodePlayProgress.defaultValue = 0.0
+        
+        // Relationship: Podcast to Episodes
+        let podcastToEpisodes = NSRelationshipDescription()
+        podcastToEpisodes.name = "episodes"
+        podcastToEpisodes.destinationEntity = episodeEntity
+        podcastToEpisodes.deleteRule = .cascadeDeleteRule
+        podcastToEpisodes.minCount = 0
+        podcastToEpisodes.maxCount = 0 // To-many relationship
+        
+        // Relationship: Episode to Podcast
+        let episodeToPodcast = NSRelationshipDescription()
+        episodeToPodcast.name = "podcast"
+        episodeToPodcast.destinationEntity = podcastEntity
+        episodeToPodcast.deleteRule = .nullifyDeleteRule
+        episodeToPodcast.minCount = 1
+        episodeToPodcast.maxCount = 1 // To-one relationship
+        
+        // Set inverses
+        podcastToEpisodes.inverseRelationship = episodeToPodcast
+        episodeToPodcast.inverseRelationship = podcastToEpisodes
+        
+        episodeEntity.properties = [episodeId, episodePodcastId, episodeTitle, episodeDesc, episodeAudioUrl, episodePublishDate, episodeDuration, episodeFileSize, episodeIsDownloaded, episodeDownloadPath, episodePlayProgress, episodeToPodcast]
+        
+        // Add entities to model
+        managedObjectModel.entities = [podcastEntity, episodeEntity]
+        
+        // Set model to container
+        container.managedObjectModel = managedObjectModel
+    }
+    
+    // Convenience methods
+    func savePodcast(_ podcast: Podcast) {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDPodcast")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", podcast.id)
+        
+        do {
+            let results = try context.fetch(fetchRequest)
+            if let existingPodcast = results.first as? NSManagedObject {
+                // Update existing podcast
+                existingPodcast.setValue(podcast.title, forKey: "title")
+                existingPodcast.setValue(podcast.author, forKey: "author")
+                existingPodcast.setValue(podcast.description, forKey: "podcastDescription")
+                existingPodcast.setValue(podcast.imageUrl, forKey: "imageUrl")
+                existingPodcast.setValue(podcast.feedUrl, forKey: "feedUrl")
+                existingPodcast.setValue(podcast.isSubscribed, forKey: "isSubscribed")
+            } else {
+                // Create new podcast
+                let newPodcast = NSEntityDescription.insertNewObject(forEntityName: "CDPodcast", into: context)
+                newPodcast.setValue(podcast.id, forKey: "id")
+                newPodcast.setValue(podcast.title, forKey: "title")
+                newPodcast.setValue(podcast.author, forKey: "author")
+                newPodcast.setValue(podcast.description, forKey: "podcastDescription")
+                newPodcast.setValue(podcast.imageUrl, forKey: "imageUrl")
+                newPodcast.setValue(podcast.feedUrl, forKey: "feedUrl")
+                newPodcast.setValue(podcast.isSubscribed, forKey: "isSubscribed")
+            }
+            
+            try context.save()
+        } catch {
+            print("Failed to save podcast: \(error.localizedDescription)")
+        }
+    }
+    
+    func saveEpisode(_ episode: Episode) {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", episode.id)
+        
+        do {
+            let results = try context.fetch(fetchRequest)
+            if let existingEpisode = results.first as? NSManagedObject {
+                // Update existing episode
+                existingEpisode.setValue(episode.title, forKey: "title")
+                existingEpisode.setValue(episode.description, forKey: "episodeDescription")
+                existingEpisode.setValue(episode.audioUrl, forKey: "audioUrl")
+                existingEpisode.setValue(episode.publishDate, forKey: "publishDate")
+                existingEpisode.setValue(episode.duration, forKey: "duration")
+                existingEpisode.setValue(episode.fileSize, forKey: "fileSize")
+                existingEpisode.setValue(episode.isDownloaded, forKey: "isDownloaded")
+                existingEpisode.setValue(episode.downloadPath, forKey: "downloadPath")
+                existingEpisode.setValue(episode.playProgress, forKey: "playProgress")
+            } else {
+                // Create new episode
+                let newEpisode = NSEntityDescription.insertNewObject(forEntityName: "CDEpisode", into: context)
+                newEpisode.setValue(episode.id, forKey: "id")
+                newEpisode.setValue(episode.podcastId, forKey: "podcastId")
+                newEpisode.setValue(episode.title, forKey: "title")
+                newEpisode.setValue(episode.description, forKey: "episodeDescription")
+                newEpisode.setValue(episode.audioUrl, forKey: "audioUrl")
+                newEpisode.setValue(episode.publishDate, forKey: "publishDate")
+                newEpisode.setValue(episode.duration, forKey: "duration")
+                newEpisode.setValue(episode.fileSize, forKey: "fileSize")
+                newEpisode.setValue(episode.isDownloaded, forKey: "isDownloaded")
+                newEpisode.setValue(episode.downloadPath, forKey: "downloadPath")
+                newEpisode.setValue(episode.playProgress, forKey: "playProgress")
+                
+                // Connect to podcast
+                let podcastFetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDPodcast")
+                podcastFetchRequest.predicate = NSPredicate(format: "id == %@", episode.podcastId)
+                if let podcastResults = try? context.fetch(podcastFetchRequest), let podcastObject = podcastResults.first as? NSManagedObject {
+                    newEpisode.setValue(podcastObject, forKey: "podcast")
+                }
+            }
+            
+            try context.save()
+        } catch {
+            print("Failed to save episode: \(error.localizedDescription)")
+        }
+    }
+    
+    func fetchPodcasts(subscribed: Bool? = nil) -> [Podcast] {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDPodcast")
+        
+        if let isSubscribed = subscribed {
+            fetchRequest.predicate = NSPredicate(format: "isSubscribed == %@", NSNumber(value: isSubscribed))
+        }
+        
+        do {
+            let results = try context.fetch(fetchRequest) as? [NSManagedObject] ?? []
+            
+            return results.map { object in
+                Podcast(
+                    id: object.value(forKey: "id") as? String ?? "",
+                    title: object.value(forKey: "title") as? String ?? "",
+                    author: object.value(forKey: "author") as? String ?? "",
+                    description: object.value(forKey: "podcastDescription") as? String ?? "",
+                    imageUrl: object.value(forKey: "imageUrl") as? String ?? "",
+                    feedUrl: object.value(forKey: "feedUrl") as? String ?? "",
+                    isSubscribed: object.value(forKey: "isSubscribed") as? Bool ?? false
+                )
+            }
+        } catch {
+            print("Failed to fetch podcasts: \(error.localizedDescription)")
+            return []
+        }
+    }
+    
+    func fetchEpisodes(forPodcastId podcastId: String? = nil, downloaded: Bool? = nil) -> [Episode] {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        
+        var predicates: [NSPredicate] = []
+        
+        if let podcastId = podcastId {
+            predicates.append(NSPredicate(format: "podcastId == %@", podcastId))
+        }
+        
+        if let isDownloaded = downloaded {
+            predicates.append(NSPredicate(format: "isDownloaded == %@", NSNumber(value: isDownloaded)))
+        }
+        
+        if !predicates.isEmpty {
+            fetchRequest.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
+        }
+        
+        // Sort by publish date
+        let sortDescriptor = NSSortDescriptor(key: "publishDate", ascending: false)
+        fetchRequest.sortDescriptors = [sortDescriptor]
+        
+        do {
+            let results = try context.fetch(fetchRequest) as? [NSManagedObject] ?? []
+            
+            return results.map { object in
+                Episode(
+                    id: object.value(forKey: "id") as? String ?? "",
+                    podcastId: object.value(forKey: "podcastId") as? String ?? "",
+                    title: object.value(forKey: "title") as? String ?? "",
+                    description: object.value(forKey: "episodeDescription") as? String ?? "",
+                    audioUrl: object.value(forKey: "audioUrl") as? String ?? "",
+                    publishDate: object.value(forKey: "publishDate") as? Date ?? Date(),
+                    duration: object.value(forKey: "duration") as? TimeInterval ?? 0,
+                    fileSize: object.value(forKey: "fileSize") as? Int64 ?? 0,
+                    isDownloaded: object.value(forKey: "isDownloaded") as? Bool ?? false,
+                    downloadPath: object.value(forKey: "downloadPath") as? String,
+                    playProgress: object.value(forKey: "playProgress") as? TimeInterval ?? 0
+                )
+            }
+        } catch {
+            print("Failed to fetch episodes: \(error.localizedDescription)")
+            return []
+        }
+    }
+    
+    func updateEpisodeProgress(id: String, progress: TimeInterval) {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", id)
+        
+        do {
+            if let episode = try context.fetch(fetchRequest).first as? NSManagedObject {
+                episode.setValue(progress, forKey: "playProgress")
+                try context.save()
+            }
+        } catch {
+            print("Failed to update episode progress: \(error.localizedDescription)")
+        }
+    }
+    
+    func deleteDownloadedEpisode(id: String) {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", id)
+        
+        do {
+            if let episode = try context.fetch(fetchRequest).first as? NSManagedObject {
+                // Delete the file if it exists
+                if let downloadPath = episode.value(forKey: "downloadPath") as? String,
+                   let fileURL = URL(string: downloadPath) {
+                    try? FileManager.default.removeItem(at: fileURL)
+                }
+                
+                // Update the episode
+                episode.setValue(false, forKey: "isDownloaded")
+                episode.setValue(nil, forKey: "downloadPath")
+                try context.save()
+            }
+        } catch {
+            print("Failed to delete download: \(error.localizedDescription)")
+        }
+    }
+    
+    func deleteAllDownloads() {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        fetchRequest.predicate = NSPredicate(format: "isDownloaded == %@", NSNumber(value: true))
+        
+        do {
+            let episodes = try context.fetch(fetchRequest) as? [NSManagedObject] ?? []
+            
+            for episode in episodes {
+                // Delete the file if it exists
+                if let downloadPath = episode.value(forKey: "downloadPath") as? String,
+                   let fileURL = URL(string: downloadPath) {
+                    try? FileManager.default.removeItem(at: fileURL)
+                }
+                
+                // Update the episode
+                episode.setValue(false, forKey: "isDownloaded")
+                episode.setValue(nil, forKey: "downloadPath")
+            }
+            
+            try context.save()
+        } catch {
+            print("Failed to delete all downloads: \(error.localizedDescription)")
+        }
+    }
+    
+    func unsubscribeFromPodcast(id: String) {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDPodcast")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", id)
+        
+        do {
+            if let podcast = try context.fetch(fetchRequest).first as? NSManagedObject {
+                podcast.setValue(false, forKey: "isSubscribed")
+                try context.save()
+                
+                // Delete all downloaded episodes
+                let episodeFetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+                episodeFetchRequest.predicate = NSPredicate(format: "podcastId == %@ AND isDownloaded == %@", id, NSNumber(value: true))
+                
+                if let episodes = try? context.fetch(episodeFetchRequest) as? [NSManagedObject] {
+                    for episode in episodes {
+                        if let downloadPath = episode.value(forKey: "downloadPath") as? String,
+                           let fileURL = URL(string: downloadPath) {
+                            try? FileManager.default.removeItem(at: fileURL)
+                        }
+                        
+                        episode.setValue(false, forKey: "isDownloaded")
+                        episode.setValue(nil, forKey: "downloadPath")
+                    }
+                    
+                    try context.save()
+                }
+            }
+        } catch {
+            print("Failed to unsubscribe: \(error.localizedDescription)")
+        }
+    }
 }
 
 // MARK: - Services
+class NetworkMonitor: ObservableObject {
+    @Published var isConnected = true
+    private let monitor: NWPathMonitor
+    private let queue = DispatchQueue(label: "NetworkMonitor")
+    
+    init() {
+        monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                self?.isConnected = path.status == .satisfied
+            }
+        }
+        monitor.start(queue: queue)
+    }
+    
+    deinit {
+        monitor.cancel()
+    }
+}
+
 class PodcastService: ObservableObject {
-    @Published var featuredPodcasts: [Podcast] = []
     @Published var searchResults: [Podcast] = []
     @Published var isLoading: Bool = false
+    @Published var errorMessage: String? = nil
     
-    func fetchFeaturedPodcasts() {
-        isLoading = true
-        // This would normally be an API call to fetch podcasts
-        // For demo purposes, we'll create some mock data
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.featuredPodcasts = self.getMockPodcasts()
-            self.isLoading = false
-        }
-    }
+    private let persistenceController = PersistenceController.shared
+    private let itunesSearchBaseURL = "https://itunes.apple.com/search"
     
     func searchPodcasts(query: String) {
-        isLoading = true
-        // This would normally be an API call to search podcasts
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            // Filter mock podcasts based on query
-            self.searchResults = self.getMockPodcasts().filter { 
-                $0.title.lowercased().contains(query.lowercased()) || 
-                $0.author.lowercased().contains(query.lowercased())
-            }
-            self.isLoading = false
+        guard !query.isEmpty else {
+            searchResults = []
+            return
         }
-    }
-    
-    func getPodcastDetails(podcast: Podcast, completion: @escaping (Podcast) -> Void) {
-        // This would normally fetch the podcast episodes
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            var updatedPodcast = podcast
-            updatedPodcast.episodes = self.getMockEpisodes(for: podcast.id)
-            completion(updatedPodcast)
-        }
-    }
-    
-    private func getMockPodcasts() -> [Podcast] {
-        return [
-            Podcast(id: "1", title: "Tech Talk", author: "John Doe", description: "The latest in technology news and discussions.", imageUrl: "https://example.com/techtalk.jpg", feedUrl: "https://example.com/techtalk.xml"),
-            Podcast(id: "2", title: "Science Hour", author: "Jane Smith", description: "Exploring the wonders of science.", imageUrl: "https://example.com/sciencehour.jpg", feedUrl: "https://example.com/sciencehour.xml"),
-            Podcast(id: "3", title: "History Revisited", author: "Mark Johnson", description: "Exploring historical events and their impact.", imageUrl: "https://example.com/history.jpg", feedUrl: "https://example.com/history.xml"),
-            Podcast(id: "4", title: "Coding Adventures", author: "Sarah Williams", description: "Programming tips and tricks for developers.", imageUrl: "https://example.com/coding.jpg", feedUrl: "https://example.com/coding.xml"),
-            Podcast(id: "5", title: "Business Insights", author: "Robert Brown", description: "Business strategies and success stories.", imageUrl: "https://example.com/business.jpg", feedUrl: "https://example.com/business.xml")
-        ]
-    }
-    
-    private func getMockEpisodes(for podcastId: String) -> [Episode] {
-        let currentDate = Date()
-        let calendar = Calendar.current
         
-        return [
-            Episode(id: "\(podcastId)-1", title: "Episode 1", description: "This is the first episode.", audioUrl: "https://example.com/episode1.mp3", publishDate: calendar.date(byAdding: .day, value: -1, to: currentDate)!, duration: 1800),
-            Episode(id: "\(podcastId)-2", title: "Episode 2", description: "This is the second episode.", audioUrl: "https://example.com/episode2.mp3", publishDate: calendar.date(byAdding: .day, value: -8, to: currentDate)!, duration: 2400),
-            Episode(id: "\(podcastId)-3", title: "Episode 3", description: "This is the third episode.", audioUrl: "https://example.com/episode3.mp3", publishDate: calendar.date(byAdding: .day, value: -15, to: currentDate)!, duration: 3000),
-            Episode(id: "\(podcastId)-4", title: "Episode 4", description: "This is the fourth episode.", audioUrl: "https://example.com/episode4.mp3", publishDate: calendar.date(byAdding: .day, value: -22, to: currentDate)!, duration: 1500),
-            Episode(id: "\(podcastId)-5", title: "Episode 5", description: "This is the fifth episode.", audioUrl: "https://example.com/episode5.mp3", publishDate: calendar.date(byAdding: .day, value: -29, to: currentDate)!, duration: 2700)
-        ]
+        isLoading = true
+        errorMessage = nil
+        
+        // Format query for URL
+        let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let urlString = "\(itunesSearchBaseURL)?term=\(encodedQuery)&entity=podcast&limit=20"
+        
+        guard let url = URL(string: urlString) else {
+            isLoading = false
+            errorMessage = "Invalid URL"
+            return
+        }
+        
+        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                self?.isLoading = false
+                
+                if let error = error {
+                    self?.errorMessage = "Network error: \(error.localizedDescription)"
+                    return
+                }
+                
+                guard let data = data else {
+                    self?.errorMessage = "No data received"
+                    return
+                }
+                
+                do {
+                    // Parse iTunes Search API response
+                    let decoder = JSONDecoder()
+                    let response = try decoder.decode(ITunesSearchResponse.self, from: data)
+                    
+                    // Convert to our Podcast model
+                    self?.searchResults = response.results.map { result in
+                        Podcast(
+                            id: result.collectionId,
+                            title: result.collectionName,
+                            author: result.artistName,
+                            description: result.description ?? "",
+                            imageUrl: result.artworkUrl600 ?? result.artworkUrl100,
+                            feedUrl: result.feedUrl ?? ""
+                        )
+                    }
+                } catch {
+                    self?.errorMessage = "Failed to parse data: \(error.localizedDescription)"
+                }
+            }
+        }.resume()
+    }
+    
+    func subscribeToPodcast(_ podcast: Podcast, completion: @escaping (Result<Podcast, Error>) -> Void) {
+        isLoading = true
+        errorMessage = nil
+        
+        // Make sure we have a valid feed URL
+        guard !podcast.feedUrl.isEmpty, let feedURL = URL(string: podcast.feedUrl) else {
+            isLoading = false
+            errorMessage = "Invalid feed URL"
+            completion(.failure(NSError(domain: "", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid feed URL"])))
+            return
+        }
+        
+        // Fetch the podcast RSS feed
+        URLSession.shared.dataTask(with: feedURL) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                self?.isLoading = false
+                
+                if let error = error {
+                    self?.errorMessage = "Network error: \(error.localizedDescription)"
+                    completion(.failure(error))
+                    return
+                }
+                
+                guard let data = data else {
+                    self?.errorMessage = "No data received"
+                    completion(.failure(NSError(domain: "", code: 0, userInfo: [NSLocalizedDescriptionKey: "No data received"])))
+                    return
+                }
+                
+                do {
+                    // Parse the RSS feed
+                    let decoder = XMLDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    let feed = try decoder.decode(RSSFeed.self, from: data)
+                    
+                    // Create updated podcast with data from feed
+                    var updatedPodcast = podcast
+                    updatedPodcast.title = feed.channel.title
+                    updatedPodcast.author = feed.channel.author ?? podcast.author
+                    updatedPodcast.description = feed.channel.description
+                    if let imageUrl = feed.channel.image?.url {
+                        updatedPodcast.imageUrl = imageUrl
+                    }
+                    updatedPodcast.isSubscribed = true
+                    
+                    // Save the podcast to Core Data
+                    self?.persistenceController.savePodcast(updatedPodcast)
+                    
+                    // Process episodes
+                    let dateFormatter = DateFormatter()
+                    dateFormatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss Z"
+                    
+                    // Parse and save episodes
+                    for item in feed.channel.items {
+                        guard let audioUrl = item.enclosure?.url else { continue }
+                        
+                        // Create unique ID for episode
+                        let episodeId = item.guid.value
+                        
+                        // Parse date
+                        var publishDate = Date()
+                        if let pubDateString = item.pubDate {
+                            publishDate = dateFormatter.date(from: pubDateString) ?? Date()
+                        }
+                        
+                        // Parse duration
+                        var duration: TimeInterval = 0
+                        if let durationString = item.duration {
+                            // Handle various duration formats (seconds, MM:SS, HH:MM:SS)
+                            let components = durationString.components(separatedBy: ":")
+                            if components.count == 1, let seconds = TimeInterval(durationString) {
+                                duration = seconds
+                            } else if components.count == 2, let minutes = TimeInterval(components[0]), let seconds = TimeInterval(components[1]) {
+                                duration = minutes * 60 + seconds
+                            } else if components.count == 3, let hours = TimeInterval(components[0]), let minutes = TimeInterval(components[1]), let seconds = TimeInterval(components[2]) {
+                                duration = hours * 3600 + minutes * 60 + seconds
+                            }
+                        }
+                        
+                        // Create episode
+                        let episode = Episode(
+                            id: episodeId,
+                            podcastId: podcast.id,
+                            title: item.title,
+                            description: item.description ?? "",
+                            audioUrl: audioUrl,
+                            publishDate: publishDate,
+                            duration: duration,
+                            fileSize: Int64(item.enclosure?.length ?? "0") ?? 0
+                        )
+                        
+                        // Save episode to Core Data
+                        self?.persistenceController.saveEpisode(episode)
+                    }
+                    
+                    completion(.success(updatedPodcast))
+                } catch {
+                    self?.errorMessage = "Failed to parse feed: \(error.localizedDescription)"
+                    completion(.failure(error))
+                }
+            }
+        }.resume()
+    }
+    
+    func getSubscribedPodcasts() -> [Podcast] {
+        return persistenceController.fetchPodcasts(subscribed: true)
+    }
+    
+    func getEpisodesForPodcast(podcastId: String) -> [Episode] {
+        return persistenceController.fetchEpisodes(forPodcastId: podcastId)
+    }
+    
+    func getDownloadedEpisodes() -> [Episode] {
+        return persistenceController.fetchEpisodes(downloaded: true)
+    }
+    
+    func unsubscribeFromPodcast(id: String) {
+        persistenceController.unsubscribeFromPodcast(id: id)
+    }
+}
+
+// iTunes Search API models
+struct ITunesSearchResponse: Decodable {
+    let resultCount: Int
+    let results: [ITunesPodcast]
+}
+
+struct ITunesPodcast: Decodable {
+    let collectionId: String
+    let collectionName: String
+    let artistName: String
+    let artworkUrl100: String
+    let artworkUrl600: String?
+    let feedUrl: String?
+    let description: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case collectionId, collectionName, artistName, artworkUrl100, artworkUrl600, feedUrl
+        case description = "collectionDescription"
+    }
+}
+
+class DownloadService: ObservableObject {
+    @Published var activeDownloads: [String: DownloadInfo] = [:]
+    
+    private let persistenceController = PersistenceController.shared
+    
+    struct DownloadInfo {
+        var progress: Float
+        var task: URLSessionDownloadTask
+    }
+    
+    private var urlSession: URLSession!
+    
+    init() {
+        let config = URLSessionConfiguration.background(withIdentifier: "com.podcastapp.download")
+        urlSession = URLSession(configuration: config, delegate: nil, delegateQueue: nil)
+    }
+    
+    func downloadEpisode(episode: Episode) {
+        guard !episode.audioUrl.isEmpty, let url = URL(string: episode.audioUrl), !episode.isDownloaded else { return }
+        
+        // Create download task
+        let task = urlSession.downloadTask(with: url) { [weak self] tempURL, response, error in
+            guard let self = self, let tempURL = tempURL, error == nil else { return }
+            
+            // Get the FileManager and document directory
+            let fileManager = FileManager.default
+            guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+            
+            // Create a unique filename based on episode ID
+            let destinationURL = documentsURL.appendingPathComponent("\(episode.id).mp3")
+            
+            do {
+                // Remove existing file if needed
+                if fileManager.fileExists(atPath: destinationURL.path) {
+                    try fileManager.removeItem(at: destinationURL)
+                }
+                
+                // Move downloaded file to permanent location
+                try fileManager.moveItem(at: tempURL, to: destinationURL)
+                
+                // Update episode in Core Data
+                DispatchQueue.main.async {
+                    var updatedEpisode = episode
+                    updatedEpisode.isDownloaded = true
+                    updatedEpisode.downloadPath = destinationURL.absoluteString
+                    self.persistenceController.saveEpisode(updatedEpisode)
+                    
+                    // Remove from active downloads
+                    self.activeDownloads.removeValue(forKey: episode.id)
+                }
+            } catch {
+                print("Download failed: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self.activeDownloads.removeValue(forKey: episode.id)
+                }
+            }
+        }
+        
+        // Add task to active downloads
+        activeDownloads[episode.id] = DownloadInfo(progress: 0, task: task)
+        
+        // Start download
+        task.resume()
+    }
+    
+    func cancelDownload(episodeId: String) {
+        if let downloadInfo = activeDownloads[episodeId] {
+            downloadInfo.task.cancel()
+            activeDownloads.removeValue(forKey: episodeId)
+        }
+    }
+    
+    func deleteDownload(episodeId: String) {
+        persistenceController.deleteDownloadedEpisode(id: episodeId)
+    }
+    
+    func deleteAllDownloads() {
+        persistenceController.deleteAllDownloads()
+    }
+    
+    func getDownloadStatus(episodeId: String) -> Float? {
+        return activeDownloads[episodeId]?.progress
     }
 }
 
@@ -90,39 +823,95 @@ class AudioPlayerService: ObservableObject {
     private var audioPlayer: AVPlayer?
     private var playerItem: AVPlayerItem?
     private var timeObserver: Any?
+    private var statusObserver: NSKeyValueObservation?
+    private let persistenceController = PersistenceController.shared
     
     @Published var currentEpisode: Episode?
     @Published var isPlaying: Bool = false
+    @Published var isLoading: Bool = false
     @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
+    @Published var error: Error?
     
     func play(episode: Episode) {
-        guard let url = URL(string: episode.audioUrl) else { return }
-        
-        // Stop current playback if any
+        // Clear any previous state
         stop()
         
-        // Create new player
-        playerItem = AVPlayerItem(url: url)
-        audioPlayer = AVPlayer(playerItem: playerItem)
-        
-        // Set current episode
+        // Set the current episode
         currentEpisode = episode
-        duration = episode.duration
+        isLoading = true
         
-        // Add time observer
-        timeObserver = audioPlayer?.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main) { [weak self] time in
-            self?.currentTime = time.seconds
+        // Determine the audio URL (local or remote)
+        var url: URL?
+        if episode.isDownloaded, let downloadPath = episode.downloadPath {
+            url = URL(string: downloadPath)
+        } else {
+            url = URL(string: episode.audioUrl)
         }
         
-        // Start playback
-        audioPlayer?.play()
-        isPlaying = true
+        guard let audioURL = url else {
+            isLoading = false
+            error = NSError(domain: "", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid audio URL"])
+            return
+        }
+        
+        // Create player item and player
+        playerItem = AVPlayerItem(url: audioURL)
+        audioPlayer = AVPlayer(playerItem: playerItem)
+        
+        // Set the initial values
+        duration = episode.duration
+        currentTime = episode.playProgress
+        
+        // Seek to the last play position if needed
+        if episode.playProgress > 0 {
+            let cmTime = CMTime(seconds: episode.playProgress, preferredTimescale: 1000)
+            audioPlayer?.seek(to: cmTime)
+        }
+        
+        // Observe status changes
+        statusObserver = playerItem?.observe(\.status, options: [.new, .old], changeHandler: { [weak self] item, change in
+            DispatchQueue.main.async {
+                switch item.status {
+                case .readyToPlay:
+                    self?.isLoading = false
+                    self?.duration = item.duration.seconds
+                    self?.audioPlayer?.play()
+                    self?.isPlaying = true
+                case .failed:
+                    self?.isLoading = false
+                    self?.error = item.error
+                default:
+                    break
+                }
+            }
+        })
+        
+        // Add periodic time observer
+        timeObserver = audioPlayer?.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 1000), queue: .main) { [weak self] time in
+            guard let self = self, let episode = self.currentEpisode else { return }
+            
+            let currentTime = time.seconds
+            self.currentTime = currentTime
+            
+            // Save progress every 5 seconds
+            if Int(currentTime) % 5 == 0 {
+                self.persistenceController.updateEpisodeProgress(id: episode.id, progress: currentTime)
+            }
+        }
+        
+        // Register for notifications
+        setupNotifications()
     }
     
     func pause() {
         audioPlayer?.pause()
         isPlaying = false
+        
+        // Save progress
+        if let episode = currentEpisode {
+            persistenceController.updateEpisodeProgress(id: episode.id, progress: currentTime)
+        }
     }
     
     func resume() {
@@ -131,24 +920,30 @@ class AudioPlayerService: ObservableObject {
     }
     
     func stop() {
-        audioPlayer?.pause()
-        isPlaying = false
+        // Save progress
+        if let episode = currentEpisode {
+            persistenceController.updateEpisodeProgress(id: episode.id, progress: currentTime)
+        }
         
+        // Remove observers
         if let timeObserver = timeObserver {
             audioPlayer?.removeTimeObserver(timeObserver)
             self.timeObserver = nil
         }
         
+        statusObserver?.invalidate()
+        statusObserver = nil
+        
+        // Clear player
+        audioPlayer?.pause()
         audioPlayer = nil
         playerItem = nil
-        currentEpisode = nil
-        currentTime = 0
-        duration = 0
-    }
-    
-    func seek(to time: TimeInterval) {
-        let cmTime = CMTime(seconds: time, preferredTimescale: 1)
-        audioPlayer?.seek(to: cmTime)
+        
+        // Reset state
+        isPlaying = false
+        isLoading = false
+        
+        // Don't clear episode or time so mini player can still show info
     }
     
     func togglePlayback() {
@@ -158,86 +953,98 @@ class AudioPlayerService: ObservableObject {
             resume()
         }
     }
-}
-
-class DownloadService: ObservableObject {
-    @Published var downloads: [String: Float] = [:]
     
-    func downloadEpisode(episode: Episode, progressHandler: @escaping (Float) -> Void, completion: @escaping (Bool) -> Void) {
-        // In a real app, this would initiate a download session
-        // For demo purposes, we'll simulate a download
+    func seek(to time: TimeInterval) {
+        let cmTime = CMTime(seconds: time, preferredTimescale: 1000)
+        audioPlayer?.seek(to: cmTime)
         
-        let episodeId = episode.id
-        downloads[episodeId] = 0.0
-        
-        // Simulate download progress
-        var progress: Float = 0.0
-        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
-            progress += 0.1
-            self?.downloads[episodeId] = progress
-            progressHandler(progress)
-            
-            if progress >= 1.0 {
-                timer.invalidate()
-                self?.downloads.removeValue(forKey: episodeId)
-                completion(true)
-            }
+        if let episode = currentEpisode {
+            persistenceController.updateEpisodeProgress(id: episode.id, progress: time)
         }
     }
     
-    func cancelDownload(episodeId: String) {
-        downloads.removeValue(forKey: episodeId)
-    }
-}
-
-// MARK: - View Models
-class PodcastViewModel: ObservableObject {
-    @Published var podcast: Podcast
-    @Published var isLoading: Bool = false
-    
-    private let podcastService = PodcastService()
-    
-    init(podcast: Podcast) {
-        self.podcast = podcast
-        fetchEpisodes()
+    func skipForward() {
+        let newTime = min(currentTime + 30, duration)
+        seek(to: newTime)
     }
     
-    func fetchEpisodes() {
-        isLoading = true
-        podcastService.getPodcastDetails(podcast: podcast) { [weak self] updatedPodcast in
-            DispatchQueue.main.async {
-                self?.podcast = updatedPodcast
-                self?.isLoading = false
-            }
+    func skipBackward() {
+        let newTime = max(currentTime - 15, 0)
+        seek(to: newTime)
+    }
+    
+    func setPlaybackRate(_ rate: Float) {
+        audioPlayer?.rate = rate
+    }
+    
+    private func setupNotifications() {
+        let center = NotificationCenter.default
+        
+        // Handle playback interruptions (phone calls, etc.)
+        center.addObserver(self, selector: #selector(handleInterruption), name: AVAudioSession.interruptionNotification, object: nil)
+        
+        // Handle playback completion
+        center.addObserver(self, selector: #selector(handlePlaybackCompletion), name: .AVPlayerItemDidPlayToEndTime, object: playerItem)
+    }
+    
+    @objc private func handleInterruption(notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+            return
         }
+        
+        switch type {
+        case .began:
+            pause()
+        case .ended:
+            guard let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt,
+                  AVAudioSession.InterruptionOptions(rawValue: optionsValue).contains(.shouldResume) else {
+                return
+            }
+            resume()
+        @unknown default:
+            break
+        }
+    }
+    
+    @objc private func handlePlaybackCompletion(notification: Notification) {
+        isPlaying = false
+        
+        // Reset play progress to 0
+        if let episode = currentEpisode {
+            persistenceController.updateEpisodeProgress(id: episode.id, progress: 0)
+        }
+        
+        // Reset position to beginning
+        currentTime = 0
+        seek(to: 0)
     }
 }
 
 // MARK: - Views
 struct ContentView: View {
     @StateObject private var podcastService = PodcastService()
-    @StateObject private var audioPlayerService = AudioPlayerService()
     @StateObject private var downloadService = DownloadService()
-    
-    @State private var searchText: String = ""
-    @State private var isSearching: Bool = false
+    @StateObject private var audioPlayerService = AudioPlayerService()
+    @StateObject private var networkMonitor = NetworkMonitor()
     
     var body: some View {
         ZStack {
             TabView {
-                DiscoverView(podcastService: podcastService, audioPlayerService: audioPlayerService)
-                    .tabItem {
-                        Label("Discover", systemImage: "magnifyingglass")
-                    }
-                
-                LibraryView(audioPlayerService: audioPlayerService)
+                LibraryView()
                     .tabItem {
                         Label("Library", systemImage: "books.vertical")
                     }
                 
-                DownloadsView(audioPlayerService: audioPlayerService)
+                DownloadsView()
                     .tabItem {
                         Label("Downloads", systemImage: "arrow.down.circle")
+                    }
+                
+                SearchView()
+                    .tabItem {
+                        Label("Search", systemImage: "magnifyingglass")
                     }
                 
                 SettingsView()
@@ -246,165 +1053,108 @@ struct ContentView: View {
                     }
             }
             
+            // Mini player that appears when something is playing
             if audioPlayerService.currentEpisode != nil {
                 VStack {
                     Spacer()
-                    MiniPlayerView(audioPlayerService: audioPlayerService)
+                    MiniPlayerView()
                         .background(Color(.systemBackground))
                         .shadow(radius: 2)
                 }
             }
+            
+            // Network warning overlay
+            if !networkMonitor.isConnected {
+                VStack {
+                    HStack {
+                        Image(systemName: "wifi.slash")
+                        Text("No internet connection")
+                        Spacer()
+                    }
+                    .padding()
+                    .background(Color.red.opacity(0.8))
+                    .foregroundColor(.white)
+                    
+                    Spacer()
+                }
+            }
         }
         .environmentObject(podcastService)
-        .environmentObject(audioPlayerService)
         .environmentObject(downloadService)
+        .environmentObject(audioPlayerService)
     }
 }
 
-struct DiscoverView: View {
-    @ObservedObject var podcastService: PodcastService
-    @ObservedObject var audioPlayerService: AudioPlayerService
-    
-    @State private var searchText: String = ""
-    @State private var isSearching: Bool = false
+struct LibraryView: View {
+    @EnvironmentObject var podcastService: PodcastService
+    @EnvironmentObject var audioPlayerService: AudioPlayerService
+    @State private var subscribedPodcasts: [Podcast] = []
+    @State private var refreshing = false
     
     var body: some View {
         NavigationView {
-            VStack {
-                SearchBar(text: $searchText, isSearching: $isSearching, onCommit: {
-                    if !searchText.isEmpty {
-                        podcastService.searchPodcasts(query: searchText)
+            Group {
+                if subscribedPodcasts.isEmpty {
+                    VStack(spacing: 20) {
+                        Image(systemName: "mic")
+                            .font(.system(size: 72))
+                            .foregroundColor(.secondary)
+                        
+                        Text("No podcasts yet")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        
+                        Text("Search for podcasts to add to your library")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                        
+                        NavigationLink(destination: SearchView()) {
+                            Text("Search Podcasts")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .padding()
+                                .background(Color.blue)
+                                .cornerRadius(10)
+                        }
+                        .padding(.top)
                     }
-                })
-                .padding(.horizontal)
-                
-                if isSearching && !searchText.isEmpty {
-                    // Search results
-                    if podcastService.isLoading {
-                        ProgressView()
-                            .progressViewStyle(CircularProgressViewStyle())
-                            .padding()
-                    } else {
-                        PodcastListView(
-                            title: "Search Results",
-                            podcasts: podcastService.searchResults,
-                            audioPlayerService: audioPlayerService
-                        )
-                    }
+                    .padding()
                 } else {
-                    // Featured podcasts
-                    ScrollView {
-                        VStack(alignment: .leading) {
-                            if podcastService.isLoading {
-                                ProgressView()
-                                    .progressViewStyle(CircularProgressViewStyle())
-                                    .padding()
-                            } else {
-                                PodcastListView(
-                                    title: "Featured Podcasts",
-                                    podcasts: podcastService.featuredPodcasts,
-                                    audioPlayerService: audioPlayerService
-                                )
-                                
-                                PodcastGridView(
-                                    title: "Popular Podcasts",
-                                    podcasts: Array(podcastService.featuredPodcasts.prefix(4)),
-                                    audioPlayerService: audioPlayerService
-                                )
-                                
-                                PodcastListView(
-                                    title: "Recommended For You",
-                                    podcasts: Array(podcastService.featuredPodcasts.suffix(3)),
-                                    audioPlayerService: audioPlayerService
-                                )
+                    List {
+                        ForEach(subscribedPodcasts) { podcast in
+                            NavigationLink(destination: PodcastDetailView(podcast: podcast)) {
+                                PodcastRowView(podcast: podcast)
                             }
                         }
-                        .padding()
+                    }
+                    .listStyle(PlainListStyle())
+                    .refreshable {
+                        refreshing = true
+                        // In a real app, you would refresh podcast feeds here
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        loadSubscribedPodcasts()
+                        refreshing = false
                     }
                 }
             }
-            .navigationTitle("Discover")
+            .navigationTitle("Library")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    NavigationLink(destination: SearchView()) {
+                        Image(systemName: "magnifyingglass")
+                    }
+                }
+            }
             .onAppear {
-                if podcastService.featuredPodcasts.isEmpty {
-                    podcastService.fetchFeaturedPodcasts()
-                }
+                loadSubscribedPodcasts()
             }
         }
     }
-}
-
-struct SearchBar: View {
-    @Binding var text: String
-    @Binding var isSearching: Bool
-    var onCommit: () -> Void
     
-    var body: some View {
-        HStack {
-            TextField("Search podcasts", text: $text, onCommit: onCommit)
-                .padding(8)
-                .background(Color(.systemGray6))
-                .cornerRadius(10)
-                .padding(.trailing, 8)
-                .onTapGesture {
-                    isSearching = true
-                }
-            
-            if isSearching {
-                Button("Cancel") {
-                    text = ""
-                    isSearching = false
-                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                }
-                .foregroundColor(.blue)
-            }
-        }
-    }
-}
-
-struct PodcastListView: View {
-    var title: String
-    var podcasts: [Podcast]
-    @ObservedObject var audioPlayerService: AudioPlayerService
-    
-    var body: some View {
-        VStack(alignment: .leading) {
-            Text(title)
-                .font(.title2)
-                .fontWeight(.bold)
-                .padding(.vertical, 8)
-            
-            ForEach(podcasts) { podcast in
-                NavigationLink(destination: PodcastDetailView(podcast: podcast, audioPlayerService: audioPlayerService)) {
-                    PodcastRowView(podcast: podcast)
-                }
-            }
-        }
-    }
-}
-
-struct PodcastGridView: View {
-    var title: String
-    var podcasts: [Podcast]
-    @ObservedObject var audioPlayerService: AudioPlayerService
-    
-    var body: some View {
-        VStack(alignment: .leading) {
-            Text(title)
-                .font(.title2)
-                .fontWeight(.bold)
-                .padding(.vertical, 8)
-            
-            LazyVGrid(columns: [
-                GridItem(.flexible()),
-                GridItem(.flexible())
-            ], spacing: 16) {
-                ForEach(podcasts) { podcast in
-                    NavigationLink(destination: PodcastDetailView(podcast: podcast, audioPlayerService: audioPlayerService)) {
-                        PodcastGridItemView(podcast: podcast)
-                    }
-                }
-            }
-        }
+    private func loadSubscribedPodcasts() {
+        subscribedPodcasts = podcastService.getSubscribedPodcasts()
     }
 }
 
@@ -412,18 +1162,34 @@ struct PodcastRowView: View {
     var podcast: Podcast
     
     var body: some View {
-        HStack {
-            // In a real app, you would use AsyncImage for iOS 15+ or a custom image loader
-            Color.gray
-                .frame(width: 60, height: 60)
-                .cornerRadius(4)
-                .overlay(
-                    Text(podcast.title.prefix(1))
-                        .foregroundColor(.white)
-                        .font(.title)
-                )
+        HStack(spacing: 12) {
+            AsyncImage(url: URL(string: podcast.imageUrl)) { phase in
+                switch phase {
+                case .empty:
+                    Color.gray
+                        .frame(width: 60, height: 60)
+                        .cornerRadius(8)
+                case .success(let image):
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 60, height: 60)
+                        .cornerRadius(8)
+                case .failure:
+                    Color.gray
+                        .frame(width: 60, height: 60)
+                        .cornerRadius(8)
+                        .overlay(
+                            Image(systemName: "photo")
+                                .foregroundColor(.white)
+                        )
+                @unknown default:
+                    EmptyView()
+                }
+            }
+            .frame(width: 60, height: 60)
             
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(podcast.title)
                     .font(.headline)
                     .lineLimit(1)
@@ -433,158 +1199,137 @@ struct PodcastRowView: View {
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
-            
-            Spacer()
         }
         .padding(.vertical, 4)
     }
 }
 
-struct PodcastGridItemView: View {
+struct PodcastDetailView: View {
+    @EnvironmentObject var podcastService: PodcastService
+    @EnvironmentObject var downloadService: DownloadService
+    @EnvironmentObject var audioPlayerService: AudioPlayerService
+    
     var podcast: Podcast
+    @State private var episodes: [Episode] = []
+    @State private var showingUnsubscribeAlert = false
     
     var body: some View {
-        VStack {
-            // In a real app, you would use AsyncImage for iOS 15+ or a custom image loader
-            Color.gray
-                .aspectRatio(1, contentMode: .fit)
-                .cornerRadius(8)
-                .overlay(
-                    Text(podcast.title.prefix(1))
-                        .foregroundColor(.white)
-                        .font(.largeTitle)
-                )
+        VStack(spacing: 0) {
+            // Header
+            PodcastHeaderView(podcast: podcast)
+                .padding()
+                .background(Color(.systemBackground))
             
-            Text(podcast.title)
-                .font(.caption)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-                .padding(.top, 4)
+            Divider()
+            
+            // Episodes List
+            List {
+                ForEach(episodes) { episode in
+                    EpisodeRowView(episode: episode)
+                        .padding(.vertical, 8)
+                }
+            }
+            .listStyle(PlainListStyle())
         }
+        .navigationTitle(podcast.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button(action: {
+                    showingUnsubscribeAlert = true
+                }) {
+                    Image(systemName: "ellipsis")
+                }
+                .alert("Unsubscribe from \(podcast.title)", isPresented: $showingUnsubscribeAlert) {
+                    Button("Cancel", role: .cancel) { }
+                    Button("Unsubscribe", role: .destructive) {
+                        podcastService.unsubscribeFromPodcast(id: podcast.id)
+                    }
+                } message: {
+                    Text("You will no longer receive new episodes for this podcast.")
+                }
+            }
+        }
+        .onAppear {
+            loadEpisodes()
+        }
+    }
+    
+    private func loadEpisodes() {
+        episodes = podcastService.getEpisodesForPodcast(podcastId: podcast.id)
     }
 }
 
-struct PodcastDetailView: View {
-    @StateObject private var viewModel: PodcastViewModel
-    @ObservedObject var audioPlayerService: AudioPlayerService
-    @EnvironmentObject var downloadService: DownloadService
-    
-    init(podcast: Podcast, audioPlayerService: AudioPlayerService) {
-        _viewModel = StateObject(wrappedValue: PodcastViewModel(podcast: podcast))
-        self.audioPlayerService = audioPlayerService
-    }
+struct PodcastHeaderView: View {
+    var podcast: Podcast
     
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading) {
-                // Podcast header
-                HStack(alignment: .top) {
-                    // In a real app, you would use AsyncImage for iOS 15+ or a custom image loader
+        HStack(alignment: .top, spacing: 12) {
+            // Podcast image
+            AsyncImage(url: URL(string: podcast.imageUrl)) { phase in
+                switch phase {
+                case .empty:
+                    Color.gray
+                        .aspectRatio(1, contentMode: .fit)
+                        .frame(width: 100, height: 100)
+                        .cornerRadius(8)
+                case .success(let image):
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 100, height: 100)
+                        .cornerRadius(8)
+                case .failure:
                     Color.gray
                         .frame(width: 100, height: 100)
                         .cornerRadius(8)
                         .overlay(
-                            Text(viewModel.podcast.title.prefix(1))
+                            Image(systemName: "photo")
                                 .foregroundColor(.white)
-                                .font(.largeTitle)
                         )
-                    
-                    VStack(alignment: .leading) {
-                        Text(viewModel.podcast.title)
-                            .font(.title2)
-                            .fontWeight(.bold)
-                            .lineLimit(2)
-                        
-                        Text(viewModel.podcast.author)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                        
-                        HStack {
-                            Button(action: {
-                                // Subscribe action
-                            }) {
-                                Label("Subscribe", systemImage: "plus.circle")
-                                    .font(.caption)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(Color.blue)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(16)
-                            }
-                            
-                            Spacer()
-                        }
-                        .padding(.top, 4)
-                    }
-                    .padding(.leading, 8)
-                }
-                .padding(.bottom, 16)
-                
-                // Description
-                Text("About")
-                    .font(.headline)
-                    .padding(.bottom, 4)
-                
-                Text(viewModel.podcast.description)
-                    .font(.body)
-                    .lineLimit(nil)
-                    .padding(.bottom, 16)
-                
-                // Episodes
-                HStack {
-                    Text("Episodes")
-                        .font(.headline)
-                    
-                    Spacer()
-                    
-                    if viewModel.isLoading {
-                        ProgressView()
-                            .progressViewStyle(CircularProgressViewStyle())
-                    }
-                }
-                .padding(.bottom, 8)
-                
-                if let episodes = viewModel.podcast.episodes {
-                    ForEach(episodes) { episode in
-                        EpisodeRowView(
-                            episode: episode,
-                            audioPlayerService: audioPlayerService,
-                            downloadService: downloadService
-                        )
-                        .padding(.vertical, 4)
-                        
-                        Divider()
-                    }
-                } else {
-                    Text("No episodes available")
-                        .foregroundColor(.secondary)
-                        .padding()
+                @unknown default:
+                    EmptyView()
                 }
             }
-            .padding()
+            .frame(width: 100, height: 100)
+            
+            // Podcast info
+            VStack(alignment: .leading, spacing: 4) {
+                Text(podcast.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                
+                Text(podcast.author)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                
+                Text(podcast.description)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(3)
+                    .padding(.top, 4)
+            }
         }
-        .navigationTitle("Podcast")
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
 struct EpisodeRowView: View {
     var episode: Episode
-    @ObservedObject var audioPlayerService: AudioPlayerService
-    @ObservedObject var downloadService: DownloadService
-    
-    @State private var isDownloading: Bool = false
-    @State private var downloadProgress: Float = 0.0
-    @State private var showingOptions: Bool = false
+    @EnvironmentObject var audioPlayerService: AudioPlayerService
+    @EnvironmentObject var downloadService: DownloadService
+    @State private var showOptions = false
     
     var body: some View {
-        VStack(alignment: .leading) {
+        VStack(alignment: .leading, spacing: 8) {
+            // Title
             Text(episode.title)
                 .font(.headline)
-                .lineLimit(1)
+                .lineLimit(2)
             
+            // Metadata
             HStack {
-                Text(formattedDate(episode.publishDate))
+                Text(formatDate(episode.publishDate))
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
@@ -592,7 +1337,7 @@ struct EpisodeRowView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
-                Text(formattedDuration(episode.duration))
+                Text(formatDuration(episode.duration))
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
@@ -601,87 +1346,104 @@ struct EpisodeRowView: View {
                 if episode.isDownloaded {
                     Image(systemName: "arrow.down.circle.fill")
                         .foregroundColor(.green)
-                } else if let progress = downloadService.downloads[episode.id], progress < 1.0 {
-                    ProgressView(value: progress)
-                        .progressViewStyle(LinearProgressViewStyle())
-                        .frame(width: 40)
+                } else if downloadService.activeDownloads[episode.id] != nil {
+                    ProgressView()
+                        .scaleEffect(0.7)
                 }
             }
             
-            Text(episode.description)
-                .font(.subheadline)
-                .lineLimit(2)
-                .foregroundColor(.secondary)
-                .padding(.top, 2)
+            // Description
+            if !episode.description.isEmpty {
+                Text(episode.description)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                    .padding(.top, 2)
+            }
             
+            // Control buttons
             HStack {
                 Button(action: {
-                    if episode.id == audioPlayerService.currentEpisode?.id {
+                    if audioPlayerService.currentEpisode?.id == episode.id {
                         audioPlayerService.togglePlayback()
                     } else {
                         audioPlayerService.play(episode: episode)
                     }
                 }) {
                     HStack {
-                        Image(systemName: (episode.id == audioPlayerService.currentEpisode?.id && audioPlayerService.isPlaying) ? "pause.fill" : "play.fill")
+                        Image(systemName: (audioPlayerService.currentEpisode?.id == episode.id && audioPlayerService.isPlaying) ? "pause.fill" : "play.fill")
                         
-                        Text((episode.id == audioPlayerService.currentEpisode?.id && audioPlayerService.isPlaying) ? "Pause" : "Play")
+                        Text((audioPlayerService.currentEpisode?.id == episode.id && audioPlayerService.isPlaying) ? "Pause" : "Play")
                     }
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
+                    .font(.footnote)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
                     .background(Color.blue)
-                    .cornerRadius(20)
+                    .foregroundColor(.white)
+                    .cornerRadius(16)
+                }
+                
+                if !episode.isDownloaded && downloadService.activeDownloads[episode.id] == nil {
+                    Button(action: {
+                        downloadService.downloadEpisode(episode: episode)
+                    }) {
+                        HStack {
+                            Image(systemName: "arrow.down")
+                            Text("Download")
+                        }
+                        .font(.footnote)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color(.systemGray5))
+                        .foregroundColor(.primary)
+                        .cornerRadius(16)
+                    }
+                } else if downloadService.activeDownloads[episode.id] != nil {
+                    Button(action: {
+                        downloadService.cancelDownload(episodeId: episode.id)
+                    }) {
+                        HStack {
+                            Image(systemName: "xmark")
+                            Text("Cancel")
+                        }
+                        .font(.footnote)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color(.systemGray5))
+                        .foregroundColor(.primary)
+                        .cornerRadius(16)
+                    }
+                } else if episode.isDownloaded {
+                    Button(action: {
+                        showOptions = true
+                    }) {
+                        Image(systemName: "ellipsis")
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color(.systemGray5))
+                            .foregroundColor(.primary)
+                            .cornerRadius(16)
+                    }
+                    .confirmationDialog("Episode Options", isPresented: $showOptions) {
+                        Button("Delete Download", role: .destructive) {
+                            downloadService.deleteDownload(episodeId: episode.id)
+                        }
+                        Button("Cancel", role: .cancel) { }
+                    }
                 }
                 
                 Spacer()
-                
-                Button(action: {
-                    showingOptions = true
-                }) {
-                    Image(systemName: "ellipsis")
-                        .padding(8)
-                }
-                .actionSheet(isPresented: $showingOptions) {
-                    ActionSheet(
-                        title: Text(episode.title),
-                        buttons: [
-                            .default(Text(episode.isDownloaded ? "Delete Download" : "Download Episode")) {
-                                if episode.isDownloaded {
-                                    // Delete download logic
-                                } else {
-                                    isDownloading = true
-                                    downloadService.downloadEpisode(
-                                        episode: episode,
-                                        progressHandler: { progress in
-                                            self.downloadProgress = progress
-                                        },
-                                        completion: { success in
-                                            isDownloading = false
-                                            // In a real app, you would update the episode's isDownloaded status
-                                        }
-                                    )
-                                }
-                            },
-                            .default(Text("Share Episode")) {
-                                // Share logic
-                            },
-                            .cancel()
-                        ]
-                    )
-                }
             }
-            .padding(.top, 8)
         }
     }
     
-    private func formattedDate(_ date: Date) -> String {
+    private func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         return formatter.string(from: date)
     }
     
-    private func formattedDuration(_ duration: TimeInterval) -> String {
+    private func formatDuration(_ duration: TimeInterval) -> String {
         let hours = Int(duration) / 3600
         let minutes = (Int(duration) % 3600) / 60
         
@@ -693,203 +1455,475 @@ struct EpisodeRowView: View {
     }
 }
 
-struct MiniPlayerView: View {
-    @ObservedObject var audioPlayerService: AudioPlayerService
-    @State private var showFullPlayer: Bool = false
+struct DownloadsView: View {
+    @EnvironmentObject var podcastService: PodcastService
+    @EnvironmentObject var downloadService: DownloadService
+    @State private var downloadedEpisodes: [Episode] = []
+    @State private var showClearAllAlert = false
     
     var body: some View {
-        if let episode = audioPlayerService.currentEpisode {
-            VStack {
-                HStack {
-                    // Episode image
-                    Color.gray
-                        .frame(width: 40, height: 40)
-                        .cornerRadius(4)
-                    
-                    // Title and author
-                    VStack(alignment: .leading) {
-                        Text(episode.title)
+        NavigationView {
+            Group {
+                if downloadedEpisodes.isEmpty {
+                    VStack(spacing: 20) {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 72))
+                            .foregroundColor(.secondary)
+                        
+                        Text("No Downloads")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                        
+                        Text("Episodes you download will appear here")
                             .font(.subheadline)
-                            .lineLimit(1)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
                     }
-                    
-                    Spacer()
-                    
-                    // Play/Pause button
-                    Button(action: {
-                        audioPlayerService.togglePlayback()
-                    }) {
-                        Image(systemName: audioPlayerService.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.title3)
-                            .padding(8)
+                } else {
+                    List {
+                        ForEach(downloadedEpisodes) { episode in
+                            DownloadedEpisodeRow(episode: episode)
+                        }
                     }
-                    
-                    // Next button (disabled in this simplified version)
-                    Button(action: {}) {
-                        Image(systemName: "forward.fill")
-                            .font(.title3)
-                            .padding(8)
+                    .listStyle(PlainListStyle())
+                }
+            }
+            .navigationTitle("Downloads")
+            .toolbar {
+                if !downloadedEpisodes.isEmpty {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button(action: {
+                            showClearAllAlert = true
+                        }) {
+                            Text("Clear All")
+                        }
+                        .alert("Delete All Downloads", isPresented: $showClearAllAlert) {
+                            Button("Cancel", role: .cancel) { }
+                            Button("Delete All", role: .destructive) {
+                                downloadService.deleteAllDownloads()
+                                loadDownloadedEpisodes()
+                            }
+                        } message: {
+                            Text("This will remove all downloaded episodes. This action cannot be undone.")
+                        }
                     }
                 }
-                .padding(.horizontal)
-                
-                // Progress bar
-                ProgressView(value: audioPlayerService.currentTime, total: audioPlayerService.duration)
-                    .progressViewStyle(LinearProgressViewStyle())
-                    .padding(.horizontal)
             }
-            .padding(.vertical, 8)
-            .background(Color(.systemBackground))
-            .onTapGesture {
-                showFullPlayer = true
+            .onAppear {
+                loadDownloadedEpisodes()
             }
-            .sheet(isPresented: $showFullPlayer) {
-                FullPlayerView(audioPlayerService: audioPlayerService)
-            }
-        } else {
-            EmptyView()
         }
+    }
+    
+    private func loadDownloadedEpisodes() {
+        downloadedEpisodes = podcastService.getDownloadedEpisodes()
     }
 }
 
-struct FullPlayerView: View {
-    @ObservedObject var audioPlayerService: AudioPlayerService
-    @Environment(\.presentationMode) var presentationMode
+struct DownloadedEpisodeRow: View {
+    var episode: Episode
+    @State private var podcast: Podcast?
+    @EnvironmentObject var podcastService: PodcastService
+    @EnvironmentObject var audioPlayerService: AudioPlayerService
+    @EnvironmentObject var downloadService: DownloadService
+    @State private var showDeleteAlert = false
     
     var body: some View {
-        VStack {
-            // Navigation bar
+        VStack(alignment: .leading, spacing: 8) {
+            if let podcast = podcast {
+                Text(podcast.title)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            
+            Text(episode.title)
+                .font(.headline)
+                .lineLimit(2)
+            
+            HStack {
+                Text(formatDate(episode.publishDate))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Text("•")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Text(formatDuration(episode.duration))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Spacer()
+                
+                Text(formatFileSize(episode.fileSize))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
             HStack {
                 Button(action: {
-                    presentationMode.wrappedValue.dismiss()
+                    if audioPlayerService.currentEpisode?.id == episode.id {
+                        audioPlayerService.togglePlayback()
+                    } else {
+                        audioPlayerService.play(episode: episode)
+                    }
                 }) {
-                    Image(systemName: "chevron.down")
-                        .padding()
+                    HStack {
+                        Image(systemName: (audioPlayerService.currentEpisode?.id == episode.id && audioPlayerService.isPlaying) ? "pause.fill" : "play.fill")
+                        
+                        Text((audioPlayerService.currentEpisode?.id == episode.id && audioPlayerService.isPlaying) ? "Pause" : "Play")
+                    }
+                    .font(.footnote)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.blue)
+                    .foregroundColor(.white)
+                    .cornerRadius(16)
                 }
-                
-                Spacer()
-                
-                Text("Now Playing")
-                    .font(.headline)
-                
-                Spacer()
                 
                 Button(action: {
-                    // Show options
+                    showDeleteAlert = true
                 }) {
-                    Image(systemName: "ellipsis")
-                        .padding()
+                    HStack {
+                        Image(systemName: "trash")
+                        Text("Delete")
+                    }
+                    .font(.footnote)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color(.systemGray5))
+                    .foregroundColor(.primary)
+                    .cornerRadius(16)
                 }
-            }
-            
-            Spacer()
-            
-            // Podcast artwork
-            Color.gray
-                .frame(width: 300, height: 300)
-                .cornerRadius(8)
-                .overlay(
-                    Text(audioPlayerService.currentEpisode?.title.prefix(1) ?? "")
-                        .foregroundColor(.white)
-                        .font(.system(size: 100))
-                )
-                .padding(.bottom, 40)
-            
-            // Episode info
-            VStack(spacing: 4) {
-                Text(audioPlayerService.currentEpisode?.title ?? "")
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .padding(.horizontal)
-            }
-            .padding(.bottom, 40)
-            
-            // Playback controls
-            VStack {
-                // Time slider
-                HStack {
-                    Text(formatTime(audioPlayerService.currentTime))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    Slider(
-                        value: Binding(
-                            get: { audioPlayerService.currentTime },
-                            set: { audioPlayerService.seek(to: $0) }
-                        ),
-                        in: 0...max(audioPlayerService.duration, 1)
-                    )
-                    
-                    Text(formatTime(audioPlayerService.duration))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                .alert("Delete Download", isPresented: $showDeleteAlert) {
+                    Button("Cancel", role: .cancel) { }
+                    Button("Delete", role: .destructive) {
+                        downloadService.deleteDownload(episodeId: episode.id)
+                    }
+                } message: {
+                    Text("Are you sure you want to delete this download?")
                 }
-                .padding(.horizontal)
                 
-                // Playback buttons
-                HStack(spacing: 40) {
-                    Button(action: {
-                        // Skip backward
-                        let newTime = max(audioPlayerService.currentTime - 15, 0)
-                        audioPlayerService.seek(to: newTime)
-                    }) {
-                        Image(systemName: "gobackward.15")
-                            .font(.title)
-                    }
+                Spacer()
+            }
+        }
+        .padding(.vertical, 8)
+        .onAppear {
+            // Find the podcast that this episode belongs to
+            let podcasts = podcastService.getSubscribedPodcasts()
+            podcast = podcasts.first { $0.id == episode.podcastId }
+        }
+    }
+    
+    private func formatDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        return formatter.string(from: date)
+    }
+    
+    private func formatDuration(_ duration: TimeInterval) -> String {
+        let hours = Int(duration) / 3600
+        let minutes = (Int(duration) % 3600) / 60
+        
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        } else {
+            return "\(minutes)m"
+        }
+    }
+    
+    private func formatFileSize(_ size: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: size)
+    }
+}
+
+struct SearchView: View {
+    @EnvironmentObject var podcastService: PodcastService
+    @State private var searchText = ""
+    @State private var debouncedSearchText = ""
+    @State private var searchTask: Task<Void, Never>? = nil
+    
+    var body: some View {
+        NavigationView {
+            VStack {
+                // Search bar
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
                     
-                    Button(action: {
-                        audioPlayerService.togglePlayback()
-                    }) {
-                        Image(systemName: audioPlayerService.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                            .font(.system(size: 70))
-                    }
+                    TextField("Search podcasts", text: $searchText)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .onChange(of: searchText) { newValue in
+                            // Cancel previous search task
+                            searchTask?.cancel()
+                            
+                            // Debounce search
+                            searchTask = Task {
+                                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+                                if !Task.isCancelled {
+                                    DispatchQueue.main.async {
+                                        debouncedSearchText = newValue
+                                        if !newValue.isEmpty {
+                                            podcastService.searchPodcasts(query: newValue)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     
-                    Button(action: {
-                        // Skip forward
-                        let newTime = min(audioPlayerService.currentTime + 30, audioPlayerService.duration)
-                        audioPlayerService.seek(to: newTime)
-                    }) {
-                        Image(systemName: "goforward.30")
-                            .font(.title)
+                    if !searchText.isEmpty {
+                        Button(action: {
+                            searchText = ""
+                            debouncedSearchText = ""
+                        }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
                 .padding()
                 
-                // Playback speed
-                HStack {
-                    Spacer()
-                    
-                    Button(action: {
-                        // Toggle playback speed
-                    }) {
-                        Text("1.0x")
-                            .font(.subheadline)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color(.systemGray6))
-                            .cornerRadius(16)
+                // Search results or suggestions
+                Group {
+                    if debouncedSearchText.isEmpty {
+                        VStack(spacing: 20) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 64))
+                                .foregroundColor(.secondary)
+                            
+                            Text("Search for podcasts")
+                                .font(.title2)
+                                .fontWeight(.bold)
+                            
+                            Text("Enter a podcast name, topic, or author to find new shows")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal)
+                        }
+                        .padding()
+                    } else if podcastService.isLoading {
+                        ProgressView("Searching...")
+                            .progressViewStyle(CircularProgressViewStyle())
+                    } else if let errorMessage = podcastService.errorMessage {
+                        VStack {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.system(size: 64))
+                                .foregroundColor(.orange)
+                                .padding()
+                            
+                            Text("Error")
+                                .font(.title2)
+                                .fontWeight(.bold)
+                            
+                            Text(errorMessage)
+                                .font(.body)
+                                .multilineTextAlignment(.center)
+                                .padding()
+                        }
+                    } else if podcastService.searchResults.isEmpty {
+                        VStack {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 64))
+                                .foregroundColor(.secondary)
+                                .padding()
+                            
+                            Text("No results found")
+                                .font(.title2)
+                                .fontWeight(.bold)
+                            
+                            Text("Try a different search term")
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                        }
+                    } else {
+                        List {
+                            ForEach(podcastService.searchResults) { podcast in
+                                Button(action: {
+                                    showSubscribeSheet(podcast: podcast)
+                                }) {
+                                    PodcastRowView(podcast: podcast)
+                                }
+                            }
+                        }
+                        .listStyle(PlainListStyle())
                     }
-                    
-                    Spacer()
-                    
-                    Button(action: {
-                        // Sleep timer
-                    }) {
-                        Image(systemName: "timer")
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color(.systemGray6))
-                            .cornerRadius(16)
-                    }
-                    
-                    Spacer()
                 }
-                .padding(.horizontal)
             }
+            .navigationTitle("Search")
+        }
+    }
+    
+    @State private var selectedPodcast: Podcast? = nil
+    @State private var showingSubscribeSheet = false
+    @State private var isSubscribing = false
+    @State private var subscribeError: String? = nil
+    
+    private func showSubscribeSheet(podcast: Podcast) {
+        selectedPodcast = podcast
+        showingSubscribeSheet = true
+    }
+    
+    var subscribePodcastSheet: some View {
+        Group {
+            if let podcast = selectedPodcast {
+                VStack {
+                    // Podcast header
+                    PodcastHeaderView(podcast: podcast)
+                        .padding()
+                    
+                    Spacer()
+                    
+                    if isSubscribing {
+                        ProgressView("Subscribing...")
+                            .progressViewStyle(CircularProgressViewStyle())
+                            .padding()
+                    } else if let error = subscribeError {
+                        VStack {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.system(size: 32))
+                                .foregroundColor(.orange)
+                                .padding()
+                            
+                            Text("Failed to subscribe")
+                                .font(.headline)
+                            
+                            Text(error)
+                                .font(.body)
+                                .multilineTextAlignment(.center)
+                                .padding()
+                            
+                            Button("Try Again") {
+                                subscribeToPodcast()
+                            }
+                            .padding()
+                            .background(Color.blue)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                        }
+                    } else {
+                        Button(action: {
+                            subscribeToPodcast()
+                        }) {
+                            Text("Subscribe")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .padding()
+                                .frame(maxWidth: .infinity)
+                                .background(Color.blue)
+                                .cornerRadius(10)
+                        }
+                        .padding()
+                    }
+                }
+                .sheet(isPresented: $showingSubscribeSheet) {
+                    // Reset state when sheet is dismissed
+                    isSubscribing = false
+                    subscribeError = nil
+                }
+            }
+        }
+    }
+    
+    private func subscribeToPodcast() {
+        guard let podcast = selectedPodcast else { return }
+        
+        isSubscribing = true
+        subscribeError = nil
+        
+        podcastService.subscribeToPodcast(podcast) { result in
+            isSubscribing = false
             
-            Spacer()
+            switch result {
+            case .success(_):
+                showingSubscribeSheet = false
+            case .failure(let error):
+                subscribeError = error.localizedDescription
+            }
+        }
+    }
+}
+
+struct MiniPlayerView: View {
+    @EnvironmentObject var audioPlayerService: AudioPlayerService
+    @State private var showFullPlayer = false
+    
+    var body: some View {
+        if let episode = audioPlayerService.currentEpisode {
+            VStack(spacing: 0) {
+                // Progress bar
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color(.systemGray5))
+                            .frame(height: 2)
+                        
+                        Rectangle()
+                            .fill(Color.blue)
+                            .frame(width: audioPlayerService.duration > 0 ? CGFloat(audioPlayerService.currentTime / audioPlayerService.duration) * geometry.size.width : 0, height: 2)
+                    }
+                }
+                .frame(height: 2)
+                
+                HStack {
+                    // Episode title
+                    VStack(alignment: .leading) {
+                        Text(episode.title)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .lineLimit(1)
+                        
+                        Text(formatTime(audioPlayerService.currentTime) + " / " + formatTime(audioPlayerService.duration))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal)
+                    
+                    Spacer()
+                    
+                    // Playback controls
+                    HStack(spacing: 20) {
+                        Button(action: {
+                            audioPlayerService.skipBackward()
+                        }) {
+                            Image(systemName: "gobackward.15")
+                                .font(.title3)
+                        }
+                        
+                        Button(action: {
+                            audioPlayerService.togglePlayback()
+                        }) {
+                            Image(systemName: audioPlayerService.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.title2)
+                        }
+                        
+                        Button(action: {
+                            audioPlayerService.skipForward()
+                        }) {
+                            Image(systemName: "goforward.30")
+                                .font(.title3)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+                .padding(.vertical, 8)
+            }
+            .background(
+                Color(.systemBackground)
+                    .onTapGesture {
+                        showFullPlayer = true
+                    }
+            )
+            .sheet(isPresented: $showFullPlayer) {
+                FullPlayerView()
+            }
+        } else {
+            EmptyView()
         }
     }
     
@@ -906,73 +1940,220 @@ struct FullPlayerView: View {
     }
 }
 
-struct LibraryView: View {
-    @ObservedObject var audioPlayerService: AudioPlayerService
+struct FullPlayerView: View {
+    @EnvironmentObject var audioPlayerService: AudioPlayerService
+    @Environment(\.presentationMode) var presentationMode
+    @State private var playbackRate: Float = 1.0
+    @State private var showRateOptions = false
     
     var body: some View {
-        NavigationView {
-            VStack {
-                Text("Your subscriptions will appear here")
+        VStack {
+            // Dismiss button
+            HStack {
+                Button(action: {
+                    presentationMode.wrappedValue.dismiss()
+                }) {
+                    Image(systemName: "chevron.down")
+                        .foregroundColor(.secondary)
+                        .font(.title3)
+                        .padding()
+                }
+                
+                Spacer()
+                
+                Button("Done") {
+                    presentationMode.wrappedValue.dismiss()
+                }
+                .padding()
+            }
+            
+            Spacer()
+            
+            if let episode = audioPlayerService.currentEpisode {
+                // Episode artwork (represented as a placeholder)
+                Color.gray
+                    .frame(width: 300, height: 300)
+                    .cornerRadius(12)
+                    .overlay(
+                        Image(systemName: "headphones")
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .padding(80)
+                            .foregroundColor(.white)
+                    )
+                    .padding(.bottom, 40)
+                
+                // Episode title
+                Text(episode.title)
+                    .font(.title3)
+                    .fontWeight(.bold)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .padding(.horizontal)
+                
+                Spacer()
+                
+                // Playback controls
+                VStack(spacing: 20) {
+                    // Playback slider and time
+                    VStack(spacing: 8) {
+                        Slider(
+                            value: Binding<Double>(
+                                get: { audioPlayerService.currentTime },
+                                set: { audioPlayerService.seek(to: $0) }
+                            ),
+                            in: 0...max(audioPlayerService.duration, 1)
+                        )
+                        .padding(.horizontal)
+                        
+                        HStack {
+                            Text(formatTime(audioPlayerService.currentTime))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            
+                            Spacer()
+                            
+                            Text(formatTime(audioPlayerService.duration))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.horizontal)
+                    }
+                    
+                    // Main playback controls
+                    HStack(spacing: 50) {
+                        Button(action: {
+                            audioPlayerService.skipBackward()
+                        }) {
+                            Image(systemName: "gobackward.15")
+                                .font(.largeTitle)
+                        }
+                        
+                        Button(action: {
+                            audioPlayerService.togglePlayback()
+                        }) {
+                            Image(systemName: audioPlayerService.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                                .font(.system(size: 80))
+                        }
+                        
+                        Button(action: {
+                            audioPlayerService.skipForward()
+                        }) {
+                            Image(systemName: "goforward.30")
+                                .font(.largeTitle)
+                        }
+                    }
+                    .padding(.vertical)
+                    
+                    // Speed control
+                    HStack {
+                        Spacer()
+                        
+                        Button(action: {
+                            showRateOptions = true
+                        }) {
+                            Text("\(String(format: "%.1fx", playbackRate))")
+                                .font(.footnote)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color(.systemGray6))
+                                .cornerRadius(16)
+                        }
+                        .confirmationDialog("Playback Speed", isPresented: $showRateOptions) {
+                            Button("0.5x") { setRate(0.5) }
+                            Button("0.8x") { setRate(0.8) }
+                            Button("1.0x") { setRate(1.0) }
+                            Button("1.2x") { setRate(1.2) }
+                            Button("1.5x") { setRate(1.5) }
+                            Button("2.0x") { setRate(2.0) }
+                            Button("Cancel", role: .cancel) { }
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            } else {
+                Text("No episode playing")
+                    .font(.title2)
                     .foregroundColor(.secondary)
             }
-            .navigationTitle("Library")
+            
+            Spacer()
         }
     }
-}
-
-struct DownloadsView: View {
-    @ObservedObject var audioPlayerService: AudioPlayerService
     
-    var body: some View {
-        NavigationView {
-            VStack {
-                Text("Your downloaded episodes will appear here")
-                    .foregroundColor(.secondary)
-            }
-            .navigationTitle("Downloads")
+    private func setRate(_ rate: Float) {
+        playbackRate = rate
+        audioPlayerService.setPlaybackRate(rate)
+    }
+    
+    private func formatTime(_ time: TimeInterval) -> String {
+        let hours = Int(time) / 3600
+        let minutes = (Int(time) % 3600) / 60
+        let seconds = Int(time) % 60
+        
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            return String(format: "%d:%02d", minutes, seconds)
         }
     }
 }
 
 struct SettingsView: View {
-    @AppStorage("autoDownload") private var autoDownload: Bool = false
-    @AppStorage("streamingQuality") private var streamingQuality: String = "High"
-    @AppStorage("downloadQuality") private var downloadQuality: String = "Normal"
+    @AppStorage("autoDownload") private var autoDownload = false
+    @AppStorage("deleteCompletedEpisodes") private var deleteCompletedEpisodes = false
+    @AppStorage("streamingQuality") private var streamingQuality = "High"
+    @AppStorage("downloadQuality") private var downloadQuality = "Standard"
+    @State private var storageUsed: String = "0 MB"
+    @State private var appVersion: String = "1.0.0"
+    @EnvironmentObject var downloadService: DownloadService
+    @State private var showDeleteAllAlert = false
     
     var body: some View {
         NavigationView {
             Form {
                 Section(header: Text("Playback")) {
-                    Toggle("Continuous Playback", isOn: .constant(true))
-                    
                     Picker("Streaming Quality", selection: $streamingQuality) {
-                        Text("High").tag("High")
-                        Text("Normal").tag("Normal")
                         Text("Low").tag("Low")
+                        Text("Standard").tag("Standard")
+                        Text("High").tag("High")
                     }
+                    .pickerStyle(SegmentedPickerStyle())
+                    
+                    Toggle("Delete Completed Episodes", isOn: $deleteCompletedEpisodes)
                 }
                 
                 Section(header: Text("Downloads")) {
-                    Toggle("Auto Download New Episodes", isOn: $autoDownload)
+                    Toggle("Auto-Download New Episodes", isOn: $autoDownload)
                     
                     Picker("Download Quality", selection: $downloadQuality) {
-                        Text("High").tag("High")
-                        Text("Normal").tag("Normal")
                         Text("Low").tag("Low")
+                        Text("Standard").tag("Standard")
+                        Text("High").tag("High")
                     }
+                    .pickerStyle(SegmentedPickerStyle())
                     
                     HStack {
                         Text("Storage Used")
                         Spacer()
-                        Text("0 MB")
+                        Text(storageUsed)
                             .foregroundColor(.secondary)
                     }
                     
                     Button(action: {
-                        // Clear downloads
+                        showDeleteAllAlert = true
                     }) {
-                        Text("Clear All Downloads")
+                        Text("Delete All Downloads")
                             .foregroundColor(.red)
+                    }
+                    .alert("Delete All Downloads", isPresented: $showDeleteAllAlert) {
+                        Button("Cancel", role: .cancel) { }
+                        Button("Delete", role: .destructive) {
+                            downloadService.deleteAllDownloads()
+                            calculateStorageUsed()
+                        }
+                    } message: {
+                        Text("This will remove all downloaded episodes. This action cannot be undone.")
                     }
                 }
                 
@@ -980,28 +2161,50 @@ struct SettingsView: View {
                     HStack {
                         Text("Version")
                         Spacer()
-                        Text("1.0.0")
+                        Text(appVersion)
                             .foregroundColor(.secondary)
-                    }
-                    
-                    Button(action: {
-                        // Rate app
-                    }) {
-                        Text("Rate the App")
-                    }
-                    
-                    Button(action: {
-                        // Contact support
-                    }) {
-                        Text("Contact Support")
                     }
                 }
             }
             .navigationTitle("Settings")
+            .onAppear {
+                calculateStorageUsed()
+            }
+        }
+    }
+    
+    private func calculateStorageUsed() {
+        // In a real app, you would calculate actual storage used
+        // For now, we'll use a placeholder
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB]
+        formatter.countStyle = .file
+        
+        // Get downloads directory size
+        let fileManager = FileManager.default
+        if let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first {
+            do {
+                let files = try fileManager.contentsOfDirectory(at: documentsURL, includingPropertiesForKeys: [.fileSizeKey])
+                var totalSize: Int64 = 0
+                
+                for file in files {
+                    if file.pathExtension == "mp3" {
+                        let attributes = try file.resourceValues(forKeys: [.fileSizeKey])
+                        if let size = attributes.fileSize {
+                            totalSize += Int64(size)
+                        }
+                    }
+                }
+                
+                storageUsed = formatter.string(fromByteCount: totalSize)
+            } catch {
+                storageUsed = "Unknown"
+            }
         }
     }
 }
 
+// MARK: - App Entry Point
 @main
 struct PodcastsApp: App {
     var body: some Scene {
