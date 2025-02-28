@@ -1,0 +1,726 @@
+import Foundation
+import CoreData
+import SwiftUI
+
+// MARK: - Models
+struct Podcast: Identifiable, Hashable, Codable {
+    var id: String
+    var title: String
+    var author: String
+    var description: String
+    var imageUrl: String
+    var feedUrl: String
+    var isSubscribed: Bool = false
+    
+    static func == (lhs: Podcast, rhs: Podcast) -> Bool {
+        return lhs.id == rhs.id
+    }
+    
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
+struct Episode: Identifiable, Hashable, Codable {
+    var id: String
+    var podcastId: String
+    var title: String
+    var description: String
+    var audioUrl: String
+    var publishDate: Date
+    var duration: TimeInterval
+    var fileSize: Int64
+    var isDownloaded: Bool = false
+    var downloadPath: String? = nil
+    var playProgress: TimeInterval = 0
+    var isPlayed: Bool = false
+    var lastPlayedDate: Date? = nil
+}
+
+// MARK: - RSS Feed Models
+struct RSSFeed: Codable {
+    let channel: Channel
+}
+
+struct Channel: Codable {
+    let title: String
+    let description: String
+    let link: String
+    let image: RSSImage?
+    let author: String?
+    let items: [Item]
+    
+    enum CodingKeys: String, CodingKey {
+        case title, description, link, image, author = "itunes:author", items = "item"
+    }
+}
+
+struct RSSImage: Codable {
+    let url: String
+    let title: String?
+    let link: String?
+}
+
+struct Item: Codable {
+    let title: String
+    let description: String?
+    let pubDate: String?
+    let enclosure: Enclosure?
+    let guid: GUID
+    let duration: String?
+    let image: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case title, description, pubDate, enclosure, guid
+        case duration = "itunes:duration"
+        case image = "itunes:image"
+    }
+}
+
+struct Enclosure: Codable {
+    let url: String
+    let length: String?
+    let type: String?
+}
+
+struct GUID: Codable {
+    let value: String
+    
+    enum CodingKeys: String, CodingKey {
+        case value = ""
+    }
+}
+
+// MARK: - iTunes Search API models
+struct ITunesSearchResponse: Decodable {
+    let resultCount: Int
+    let results: [ITunesPodcast]
+}
+
+struct ITunesPodcast: Decodable {
+    let collectionId: String
+    let collectionName: String
+    let artistName: String
+    let artworkUrl100: String
+    let artworkUrl600: String?
+    let feedUrl: String?
+    let description: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case collectionId, collectionName, artistName, artworkUrl100, artworkUrl600, feedUrl
+        case description = "collectionDescription"
+    }
+}
+
+// MARK: - Core Data Model
+class PersistenceController {
+    static let shared = PersistenceController()
+    
+    let container: NSPersistentContainer
+    
+    init() {
+        container = NSPersistentContainer(name: "PodcastModel")
+        
+        // Create Core Data Model programmatically
+        createCoreDataModel()
+        
+        container.loadPersistentStores { description, error in
+            if let error = error {
+                fatalError("Error loading Core Data: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    private func createCoreDataModel() {
+        let managedObjectModel = NSManagedObjectModel()
+        
+        // Podcast Entity
+        let podcastEntity = NSEntityDescription()
+        podcastEntity.name = "CDPodcast"
+        podcastEntity.managedObjectClassName = "CDPodcast"
+        
+        let podcastId = NSAttributeDescription()
+        podcastId.name = "id"
+        podcastId.attributeType = .stringAttributeType
+        podcastId.isOptional = false
+        
+        let podcastTitle = NSAttributeDescription()
+        podcastTitle.name = "title"
+        podcastTitle.attributeType = .stringAttributeType
+        podcastTitle.isOptional = false
+        
+        let podcastAuthor = NSAttributeDescription()
+        podcastAuthor.name = "author"
+        podcastAuthor.attributeType = .stringAttributeType
+        podcastAuthor.isOptional = true
+        
+        let podcastDesc = NSAttributeDescription()
+        podcastDesc.name = "podcastDescription"
+        podcastDesc.attributeType = .stringAttributeType
+        podcastDesc.isOptional = true
+        
+        let podcastImageUrl = NSAttributeDescription()
+        podcastImageUrl.name = "imageUrl"
+        podcastImageUrl.attributeType = .stringAttributeType
+        podcastImageUrl.isOptional = true
+        
+        let podcastFeedUrl = NSAttributeDescription()
+        podcastFeedUrl.name = "feedUrl"
+        podcastFeedUrl.attributeType = .stringAttributeType
+        podcastFeedUrl.isOptional = false
+        
+        let podcastIsSubscribed = NSAttributeDescription()
+        podcastIsSubscribed.name = "isSubscribed"
+        podcastIsSubscribed.attributeType = .booleanAttributeType
+        podcastIsSubscribed.defaultValue = false
+        
+        podcastEntity.properties = [podcastId, podcastTitle, podcastAuthor, podcastDesc, podcastImageUrl, podcastFeedUrl, podcastIsSubscribed]
+        
+        // Episode Entity
+        let episodeEntity = NSEntityDescription()
+        episodeEntity.name = "CDEpisode"
+        episodeEntity.managedObjectClassName = "CDEpisode"
+        
+        let episodeId = NSAttributeDescription()
+        episodeId.name = "id"
+        episodeId.attributeType = .stringAttributeType
+        episodeId.isOptional = false
+        
+        let episodePodcastId = NSAttributeDescription()
+        episodePodcastId.name = "podcastId"
+        episodePodcastId.attributeType = .stringAttributeType
+        episodePodcastId.isOptional = false
+        
+        let episodeTitle = NSAttributeDescription()
+        episodeTitle.name = "title"
+        episodeTitle.attributeType = .stringAttributeType
+        episodeTitle.isOptional = false
+        
+        let episodeDesc = NSAttributeDescription()
+        episodeDesc.name = "episodeDescription"
+        episodeDesc.attributeType = .stringAttributeType
+        episodeDesc.isOptional = true
+        
+        let episodeAudioUrl = NSAttributeDescription()
+        episodeAudioUrl.name = "audioUrl"
+        episodeAudioUrl.attributeType = .stringAttributeType
+        episodeAudioUrl.isOptional = false
+        
+        let episodePublishDate = NSAttributeDescription()
+        episodePublishDate.name = "publishDate"
+        episodePublishDate.attributeType = .dateAttributeType
+        episodePublishDate.isOptional = true
+        
+        let episodeDuration = NSAttributeDescription()
+        episodeDuration.name = "duration"
+        episodeDuration.attributeType = .doubleAttributeType
+        episodeDuration.defaultValue = 0.0
+        
+        let episodeFileSize = NSAttributeDescription()
+        episodeFileSize.name = "fileSize"
+        episodeFileSize.attributeType = .integer64AttributeType
+        episodeFileSize.defaultValue = 0
+        
+        let episodeIsDownloaded = NSAttributeDescription()
+        episodeIsDownloaded.name = "isDownloaded"
+        episodeIsDownloaded.attributeType = .booleanAttributeType
+        episodeIsDownloaded.defaultValue = false
+        
+        let episodeDownloadPath = NSAttributeDescription()
+        episodeDownloadPath.name = "downloadPath"
+        episodeDownloadPath.attributeType = .stringAttributeType
+        episodeDownloadPath.isOptional = true
+        
+        let episodePlayProgress = NSAttributeDescription()
+        episodePlayProgress.name = "playProgress"
+        episodePlayProgress.attributeType = .doubleAttributeType
+        episodePlayProgress.defaultValue = 0.0
+        
+        // New attributes for history tracking
+        let episodeIsPlayed = NSAttributeDescription()
+        episodeIsPlayed.name = "isPlayed"
+        episodeIsPlayed.attributeType = .booleanAttributeType
+        episodeIsPlayed.defaultValue = false
+        
+        let episodeLastPlayedDate = NSAttributeDescription()
+        episodeLastPlayedDate.name = "lastPlayedDate"
+        episodeLastPlayedDate.attributeType = .dateAttributeType
+        episodeLastPlayedDate.isOptional = true
+        
+        // Relationship: Podcast to Episodes
+        let podcastToEpisodes = NSRelationshipDescription()
+        podcastToEpisodes.name = "episodes"
+        podcastToEpisodes.destinationEntity = episodeEntity
+        podcastToEpisodes.deleteRule = .cascadeDeleteRule
+        podcastToEpisodes.minCount = 0
+        podcastToEpisodes.maxCount = 0 // To-many relationship
+        
+        // Relationship: Episode to Podcast
+        let episodeToPodcast = NSRelationshipDescription()
+        episodeToPodcast.name = "podcast"
+        episodeToPodcast.destinationEntity = podcastEntity
+        episodeToPodcast.deleteRule = .nullifyDeleteRule
+        episodeToPodcast.minCount = 1
+        episodeToPodcast.maxCount = 1 // To-one relationship
+        
+        // Set inverses
+        podcastToEpisodes.inverseRelationship = episodeToPodcast
+        episodeToPodcast.inverseRelationship = podcastToEpisodes
+        
+        episodeEntity.properties = [episodeId, episodePodcastId, episodeTitle, episodeDesc, episodeAudioUrl, 
+                                   episodePublishDate, episodeDuration, episodeFileSize, episodeIsDownloaded, 
+                                   episodeDownloadPath, episodePlayProgress, episodeToPodcast, 
+                                   episodeIsPlayed, episodeLastPlayedDate]
+        
+        // Add entities to model
+        managedObjectModel.entities = [podcastEntity, episodeEntity]
+        
+        // Set model to container
+        container.managedObjectModel = managedObjectModel
+    }
+    
+    // MARK: - Podcast CRUD Operations
+    func savePodcast(_ podcast: Podcast) {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDPodcast")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", podcast.id)
+        
+        do {
+            let results = try context.fetch(fetchRequest)
+            if let existingPodcast = results.first as? NSManagedObject {
+                // Update existing podcast
+                existingPodcast.setValue(podcast.title, forKey: "title")
+                existingPodcast.setValue(podcast.author, forKey: "author")
+                existingPodcast.setValue(podcast.description, forKey: "podcastDescription")
+                existingPodcast.setValue(podcast.imageUrl, forKey: "imageUrl")
+                existingPodcast.setValue(podcast.feedUrl, forKey: "feedUrl")
+                existingPodcast.setValue(podcast.isSubscribed, forKey: "isSubscribed")
+            } else {
+                // Create new podcast
+                let newPodcast = NSEntityDescription.insertNewObject(forEntityName: "CDPodcast", into: context)
+                newPodcast.setValue(podcast.id, forKey: "id")
+                newPodcast.setValue(podcast.title, forKey: "title")
+                newPodcast.setValue(podcast.author, forKey: "author")
+                newPodcast.setValue(podcast.description, forKey: "podcastDescription")
+                newPodcast.setValue(podcast.imageUrl, forKey: "imageUrl")
+                newPodcast.setValue(podcast.feedUrl, forKey: "feedUrl")
+                newPodcast.setValue(podcast.isSubscribed, forKey: "isSubscribed")
+            }
+            
+            try context.save()
+        } catch {
+            print("Failed to save podcast: \(error.localizedDescription)")
+        }
+    }
+    
+    func fetchPodcasts(subscribed: Bool? = nil) -> [Podcast] {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDPodcast")
+        
+        if let isSubscribed = subscribed {
+            fetchRequest.predicate = NSPredicate(format: "isSubscribed == %@", NSNumber(value: isSubscribed))
+        }
+        
+        do {
+            let results = try context.fetch(fetchRequest) as? [NSManagedObject] ?? []
+            
+            return results.map { object in
+                Podcast(
+                    id: object.value(forKey: "id") as? String ?? "",
+                    title: object.value(forKey: "title") as? String ?? "",
+                    author: object.value(forKey: "author") as? String ?? "",
+                    description: object.value(forKey: "podcastDescription") as? String ?? "",
+                    imageUrl: object.value(forKey: "imageUrl") as? String ?? "",
+                    feedUrl: object.value(forKey: "feedUrl") as? String ?? "",
+                    isSubscribed: object.value(forKey: "isSubscribed") as? Bool ?? false
+                )
+            }
+        } catch {
+            print("Failed to fetch podcasts: \(error.localizedDescription)")
+            return []
+        }
+    }
+    
+    func unsubscribeFromPodcast(id: String) {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDPodcast")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", id)
+        
+        do {
+            if let podcast = try context.fetch(fetchRequest).first as? NSManagedObject {
+                podcast.setValue(false, forKey: "isSubscribed")
+                try context.save()
+                
+                // Delete all downloaded episodes
+                let episodeFetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+                episodeFetchRequest.predicate = NSPredicate(format: "podcastId == %@ AND isDownloaded == %@", id, NSNumber(value: true))
+                
+                if let episodes = try? context.fetch(episodeFetchRequest) as? [NSManagedObject] {
+                    for episode in episodes {
+                        if let downloadPath = episode.value(forKey: "downloadPath") as? String,
+                           let fileURL = URL(string: downloadPath) {
+                            try? FileManager.default.removeItem(at: fileURL)
+                        }
+                        
+                        episode.setValue(false, forKey: "isDownloaded")
+                        episode.setValue(nil, forKey: "downloadPath")
+                    }
+                    
+                    try context.save()
+                }
+            }
+        } catch {
+            print("Failed to unsubscribe: \(error.localizedDescription)")
+        }
+    }
+    
+    func getPodcast(id: String) -> Podcast? {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDPodcast")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", id)
+        
+        do {
+            if let podcastObject = try context.fetch(fetchRequest).first as? NSManagedObject {
+                return Podcast(
+                    id: podcastObject.value(forKey: "id") as? String ?? "",
+                    title: podcastObject.value(forKey: "title") as? String ?? "",
+                    author: podcastObject.value(forKey: "author") as? String ?? "",
+                    description: podcastObject.value(forKey: "podcastDescription") as? String ?? "",
+                    imageUrl: podcastObject.value(forKey: "imageUrl") as? String ?? "",
+                    feedUrl: podcastObject.value(forKey: "feedUrl") as? String ?? "",
+                    isSubscribed: podcastObject.value(forKey: "isSubscribed") as? Bool ?? false
+                )
+            }
+        } catch {
+            print("Failed to fetch podcast: \(error.localizedDescription)")
+        }
+        
+        return nil
+    }
+    
+    // MARK: - Episode CRUD Operations
+    func saveEpisode(_ episode: Episode) {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", episode.id)
+        
+        do {
+            let results = try context.fetch(fetchRequest)
+            if let existingEpisode = results.first as? NSManagedObject {
+                // Update existing episode
+                existingEpisode.setValue(episode.title, forKey: "title")
+                existingEpisode.setValue(episode.description, forKey: "episodeDescription")
+                existingEpisode.setValue(episode.audioUrl, forKey: "audioUrl")
+                existingEpisode.setValue(episode.publishDate, forKey: "publishDate")
+                existingEpisode.setValue(episode.duration, forKey: "duration")
+                existingEpisode.setValue(episode.fileSize, forKey: "fileSize")
+                existingEpisode.setValue(episode.isDownloaded, forKey: "isDownloaded")
+                existingEpisode.setValue(episode.downloadPath, forKey: "downloadPath")
+                existingEpisode.setValue(episode.playProgress, forKey: "playProgress")
+                existingEpisode.setValue(episode.isPlayed, forKey: "isPlayed")
+                existingEpisode.setValue(episode.lastPlayedDate, forKey: "lastPlayedDate")
+            } else {
+                // Create new episode
+                let newEpisode = NSEntityDescription.insertNewObject(forEntityName: "CDEpisode", into: context)
+                newEpisode.setValue(episode.id, forKey: "id")
+                newEpisode.setValue(episode.podcastId, forKey: "podcastId")
+                newEpisode.setValue(episode.title, forKey: "title")
+                newEpisode.setValue(episode.description, forKey: "episodeDescription")
+                newEpisode.setValue(episode.audioUrl, forKey: "audioUrl")
+                newEpisode.setValue(episode.publishDate, forKey: "publishDate")
+                newEpisode.setValue(episode.duration, forKey: "duration")
+                newEpisode.setValue(episode.fileSize, forKey: "fileSize")
+                newEpisode.setValue(episode.isDownloaded, forKey: "isDownloaded")
+                newEpisode.setValue(episode.downloadPath, forKey: "downloadPath")
+                newEpisode.setValue(episode.playProgress, forKey: "playProgress")
+                newEpisode.setValue(episode.isPlayed, forKey: "isPlayed")
+                newEpisode.setValue(episode.lastPlayedDate, forKey: "lastPlayedDate")
+                
+                // Connect to podcast
+                let podcastFetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDPodcast")
+                podcastFetchRequest.predicate = NSPredicate(format: "id == %@", episode.podcastId)
+                if let podcastResults = try? context.fetch(podcastFetchRequest), let podcastObject = podcastResults.first as? NSManagedObject {
+                    newEpisode.setValue(podcastObject, forKey: "podcast")
+                }
+            }
+            
+            try context.save()
+        } catch {
+            print("Failed to save episode: \(error.localizedDescription)")
+        }
+    }
+    
+    func fetchEpisodes(forPodcastId podcastId: String? = nil, downloaded: Bool? = nil, played: Bool? = nil) -> [Episode] {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        
+        var predicates: [NSPredicate] = []
+        
+        if let podcastId = podcastId {
+            predicates.append(NSPredicate(format: "podcastId == %@", podcastId))
+        }
+        
+        if let isDownloaded = downloaded {
+            predicates.append(NSPredicate(format: "isDownloaded == %@", NSNumber(value: isDownloaded)))
+        }
+        
+        if let isPlayed = played {
+            predicates.append(NSPredicate(format: "isPlayed == %@", NSNumber(value: isPlayed)))
+        }
+        
+        if !predicates.isEmpty {
+            fetchRequest.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
+        }
+        
+        // Sort by publish date
+        let sortDescriptor = NSSortDescriptor(key: "publishDate", ascending: false)
+        fetchRequest.sortDescriptors = [sortDescriptor]
+        
+        do {
+            let results = try context.fetch(fetchRequest) as? [NSManagedObject] ?? []
+            
+            return results.map { object in
+                Episode(
+                    id: object.value(forKey: "id") as? String ?? "",
+                    podcastId: object.value(forKey: "podcastId") as? String ?? "",
+                    title: object.value(forKey: "title") as? String ?? "",
+                    description: object.value(forKey: "episodeDescription") as? String ?? "",
+                    audioUrl: object.value(forKey: "audioUrl") as? String ?? "",
+                    publishDate: object.value(forKey: "publishDate") as? Date ?? Date(),
+                    duration: object.value(forKey: "duration") as? TimeInterval ?? 0,
+                    fileSize: object.value(forKey: "fileSize") as? Int64 ?? 0,
+                    isDownloaded: object.value(forKey: "isDownloaded") as? Bool ?? false,
+                    downloadPath: object.value(forKey: "downloadPath") as? String,
+                    playProgress: object.value(forKey: "playProgress") as? TimeInterval ?? 0,
+                    isPlayed: object.value(forKey: "isPlayed") as? Bool ?? false,
+                    lastPlayedDate: object.value(forKey: "lastPlayedDate") as? Date
+                )
+            }
+        } catch {
+            print("Failed to fetch episodes: \(error.localizedDescription)")
+            return []
+        }
+    }
+    
+    func getEpisode(id: String) -> Episode? {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", id)
+        
+        do {
+            if let episodeObject = try context.fetch(fetchRequest).first as? NSManagedObject {
+                return Episode(
+                    id: episodeObject.value(forKey: "id") as? String ?? "",
+                    podcastId: episodeObject.value(forKey: "podcastId") as? String ?? "",
+                    title: episodeObject.value(forKey: "title") as? String ?? "",
+                    description: episodeObject.value(forKey: "episodeDescription") as? String ?? "",
+                    audioUrl: episodeObject.value(forKey: "audioUrl") as? String ?? "",
+                    publishDate: episodeObject.value(forKey: "publishDate") as? Date ?? Date(),
+                    duration: episodeObject.value(forKey: "duration") as? TimeInterval ?? 0,
+                    fileSize: episodeObject.value(forKey: "fileSize") as? Int64 ?? 0,
+                    isDownloaded: episodeObject.value(forKey: "isDownloaded") as? Bool ?? false,
+                    downloadPath: episodeObject.value(forKey: "downloadPath") as? String,
+                    playProgress: episodeObject.value(forKey: "playProgress") as? TimeInterval ?? 0,
+                    isPlayed: episodeObject.value(forKey: "isPlayed") as? Bool ?? false,
+                    lastPlayedDate: episodeObject.value(forKey: "lastPlayedDate") as? Date
+                )
+            }
+        } catch {
+            print("Failed to fetch episode: \(error.localizedDescription)")
+        }
+        
+        return nil
+    }
+    
+    func updateEpisodeProgress(id: String, progress: TimeInterval) {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", id)
+        
+        do {
+            if let episode = try context.fetch(fetchRequest).first as? NSManagedObject {
+                episode.setValue(progress, forKey: "playProgress")
+                
+                // If progress is more than 90% of duration, mark as played
+                let duration = episode.value(forKey: "duration") as? TimeInterval ?? 0
+                if duration > 0 && progress > (duration * 0.9) {
+                    episode.setValue(true, forKey: "isPlayed")
+                }
+                
+                // Update last played date
+                episode.setValue(Date(), forKey: "lastPlayedDate")
+                
+                try context.save()
+            }
+        } catch {
+            print("Failed to update episode progress: \(error.localizedDescription)")
+        }
+    }
+    
+    func markEpisodeAsPlayed(id: String, played: Bool) {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", id)
+        
+        do {
+            if let episode = try context.fetch(fetchRequest).first as? NSManagedObject {
+                episode.setValue(played, forKey: "isPlayed")
+                
+                if played {
+                    // If marked as played, update the last played date
+                    episode.setValue(Date(), forKey: "lastPlayedDate")
+                }
+                
+                try context.save()
+            }
+        } catch {
+            print("Failed to mark episode as played: \(error.localizedDescription)")
+        }
+    }
+    
+    func deleteDownloadedEpisode(id: String) {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        fetchRequest.predicate = NSPredicate(format: "id == %@", id)
+        
+        do {
+            if let episode = try context.fetch(fetchRequest).first as? NSManagedObject {
+                // Delete the file if it exists
+                if let downloadPath = episode.value(forKey: "downloadPath") as? String,
+                   let fileURL = URL(string: downloadPath) {
+                    try? FileManager.default.removeItem(at: fileURL)
+                }
+                
+                // Update the episode
+                episode.setValue(false, forKey: "isDownloaded")
+                episode.setValue(nil, forKey: "downloadPath")
+                try context.save()
+            }
+        } catch {
+            print("Failed to delete download: \(error.localizedDescription)")
+        }
+    }
+    
+    func deleteAllDownloads() {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        fetchRequest.predicate = NSPredicate(format: "isDownloaded == %@", NSNumber(value: true))
+        
+        do {
+            let episodes = try context.fetch(fetchRequest) as? [NSManagedObject] ?? []
+            
+            for episode in episodes {
+                // Delete the file if it exists
+                if let downloadPath = episode.value(forKey: "downloadPath") as? String,
+                   let fileURL = URL(string: downloadPath) {
+                    try? FileManager.default.removeItem(at: fileURL)
+                }
+                
+                // Update the episode
+                episode.setValue(false, forKey: "isDownloaded")
+                episode.setValue(nil, forKey: "downloadPath")
+            }
+            
+            try context.save()
+        } catch {
+            print("Failed to delete all downloads: \(error.localizedDescription)")
+        }
+    }
+    
+    // MARK: - History Methods
+    func getRecentlyPlayedEpisodes(limit: Int = 10) -> [Episode] {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        
+        // Only get episodes that have been played and have a last played date
+        fetchRequest.predicate = NSPredicate(format: "lastPlayedDate != nil")
+        
+        // Sort by lastPlayedDate descending (most recent first)
+        let sortDescriptor = NSSortDescriptor(key: "lastPlayedDate", ascending: false)
+        fetchRequest.sortDescriptors = [sortDescriptor]
+        
+        // Limit results
+        fetchRequest.fetchLimit = limit
+        
+        do {
+            let results = try context.fetch(fetchRequest) as? [NSManagedObject] ?? []
+            
+            return results.map { object in
+                Episode(
+                    id: object.value(forKey: "id") as? String ?? "",
+                    podcastId: object.value(forKey: "podcastId") as? String ?? "",
+                    title: object.value(forKey: "title") as? String ?? "",
+                    description: object.value(forKey: "episodeDescription") as? String ?? "",
+                    audioUrl: object.value(forKey: "audioUrl") as? String ?? "",
+                    publishDate: object.value(forKey: "publishDate") as? Date ?? Date(),
+                    duration: object.value(forKey: "duration") as? TimeInterval ?? 0,
+                    fileSize: object.value(forKey: "fileSize") as? Int64 ?? 0,
+                    isDownloaded: object.value(forKey: "isDownloaded") as? Bool ?? false,
+                    downloadPath: object.value(forKey: "downloadPath") as? String,
+                    playProgress: object.value(forKey: "playProgress") as? TimeInterval ?? 0,
+                    isPlayed: object.value(forKey: "isPlayed") as? Bool ?? false,
+                    lastPlayedDate: object.value(forKey: "lastPlayedDate") as? Date
+                )
+            }
+        } catch {
+            print("Failed to fetch recently played episodes: \(error.localizedDescription)")
+            return []
+        }
+    }
+    
+    func getInProgressEpisodes() -> [Episode] {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        
+        // Episodes with some progress but not marked as played
+        fetchRequest.predicate = NSPredicate(format: "playProgress > 0 AND isPlayed == NO")
+        
+        // Sort by lastPlayedDate descending
+        let sortDescriptor = NSSortDescriptor(key: "lastPlayedDate", ascending: false)
+        fetchRequest.sortDescriptors = [sortDescriptor]
+        
+        do {
+            let results = try context.fetch(fetchRequest) as? [NSManagedObject] ?? []
+            
+            return results.map { object in
+                Episode(
+                    id: object.value(forKey: "id") as? String ?? "",
+                    podcastId: object.value(forKey: "podcastId") as? String ?? "",
+                    title: object.value(forKey: "title") as? String ?? "",
+                    description: object.value(forKey: "episodeDescription") as? String ?? "",
+                    audioUrl: object.value(forKey: "audioUrl") as? String ?? "",
+                    publishDate: object.value(forKey: "publishDate") as? Date ?? Date(),
+                    duration: object.value(forKey: "duration") as? TimeInterval ?? 0,
+                    fileSize: object.value(forKey: "fileSize") as? Int64 ?? 0,
+                    isDownloaded: object.value(forKey: "isDownloaded") as? Bool ?? false,
+                    downloadPath: object.value(forKey: "downloadPath") as? String,
+                    playProgress: object.value(forKey: "playProgress") as? TimeInterval ?? 0,
+                    isPlayed: object.value(forKey: "isPlayed") as? Bool ?? false,
+                    lastPlayedDate: object.value(forKey: "lastPlayedDate") as? Date
+                )
+            }
+        } catch {
+            print("Failed to fetch in-progress episodes: \(error.localizedDescription)")
+            return []
+        }
+    }
+    
+    func resetPlaybackHistory() {
+        let context = container.viewContext
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: "CDEpisode")
+        
+        do {
+            let results = try context.fetch(fetchRequest) as? [NSManagedObject] ?? []
+            
+            for episode in results {
+                episode.setValue(false, forKey: "isPlayed")
+                episode.setValue(0.0, forKey: "playProgress")
+                episode.setValue(nil, forKey: "lastPlayedDate")
+            }
+            
+            try context.save()
+        } catch {
+            print("Failed to reset playback history: \(error.localizedDescription)")
+        }
+    }
+}
